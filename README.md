@@ -1,6 +1,7 @@
 # toolbox-sidescale
 
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/jentfoo/toolbox-sidescale/blob/main/LICENSE)
+[![Tests - Main Push](https://github.com/jentfoo/toolbox-sidescale/actions/workflows/tests-main.yml/badge.svg)](https://github.com/jentfoo/toolbox-sidescale/actions/workflows/tests-main.yml)
 [![Vibe-Scale 3.0(V2|U1|T1): Significant AI with gaps](https://img.shields.io/badge/Vibe--Scale%203.0(V2%7CU1%7CT1)-Significant%20AI%20with%20gaps-ffe066)](https://github.com/vibesdk/vibe-scale/blob/main/scale/vibe-3.md#v2-u1-t1-score-30--significant-ai-with-gaps)
 
 **A Tailscale control-channel and DERP interception sidecar for [go-appsec/toolbox](https://github.com/go-appsec/toolbox).**
@@ -18,9 +19,7 @@ One `sidescale` process covers two Tailscale surfaces:
 - **Control channel** (`POST /ts2021`), always active.
 - **DERP relay** (`GET /derp`), opt-in, enabled by adding a `derp:` section to the config.
 
-It works against production Tailscale (`controlplane.tailscale.com`), a self-hosted coordinator such as Headscale, a Tailscale-deployed DERP server, or a local test setup. The binary is Linux-only because it links Tailscale's upstream packages. The sectool side of the contract stays cross-platform.
-
-> **Authorized testing only.** Intercepting an end-to-end encrypted protocol requires operator control of either the client's trust anchors (a test CA installed in the client) or the upstream coordination server. Have explicit authorization for anything you point this at.
+It works against production Tailscale (`controlplane.tailscale.com`), a self-hosted coordinator such as Headscale, a Tailscale-deployed DERP server, or a local test setup. The binary is Linux-only because it links Tailscale's upstream packages.
 
 ## What it captures
 
@@ -159,8 +158,8 @@ Present this section to enable the DERP surface alongside control.
 
 ```bash
 sectool proxy list --limit 3000 | grep /ts2021 | tail        # newest /ts2021 upgrade
-sectool proxy list --parent-flow-id <ts2021_flow_id>          # dial audit + tunnel envelope
-sectool proxy list --parent-flow-id <tunnel_flow_id>          # register + map children
-sectool proxy get  <tunnel_flow_id>                           # decrypted handshake headers
-sectool proxy get  <register_flow_id>                         # decrypted RegisterRequest body
+sectool proxy list --parent-flow-id <ts2021_flow_id>         # dial audit + tunnel envelope
+sectool proxy list --parent-flow-id <tunnel_flow_id>         # register + map children
+sectool proxy get  <tunnel_flow_id>                          # decrypted handshake headers
+sectool proxy get  <register_flow_id>                        # decrypted RegisterRequest body
 ```
