@@ -41,7 +41,6 @@ jobs:
       matrix:
         go:
         - '1.26'
-        - '1.25'
     steps:
       - uses: actions/checkout@v7
 
