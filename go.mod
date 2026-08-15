@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/go-analyze/bulk v0.1.5
-	github.com/go-appsec/toolbox v0.2.1
+	github.com/go-appsec/toolbox v0.2.2
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
