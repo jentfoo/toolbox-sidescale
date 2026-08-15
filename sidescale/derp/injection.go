@@ -16,6 +16,12 @@ import (
 	"github.com/jentfoo/toolbox-sidescale/sidescale/derp/derpproto"
 )
 
+// toolErr wraps an injection error as the Result object's message field.
+func toolErr(err error) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{"error": err.Error()})
+	return b
+}
+
 // injectionRequest is the derp_inject / injection_target payload.
 type injectionRequest struct {
 	TunnelID    string          `json:"tunnel_id"`
@@ -69,14 +75,14 @@ func (h *Handler) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeToolResult, 
 	}
 	ir, err := parseInjection(p.Arguments)
 	if err != nil {
-		return wire.InvokeToolResult{IsError: true, Content: err.Error()}, nil
+		return wire.InvokeToolResult{IsError: true, Result: toolErr(err)}, nil
 	}
 	res, err := h.injectFrame(h.baseCtx, ir)
 	if err != nil {
-		return wire.InvokeToolResult{IsError: true, Content: err.Error()}, nil
+		return wire.InvokeToolResult{IsError: true, Result: toolErr(err)}, nil
 	}
-	structured, _ := json.Marshal(map[string]any{"new_flow_ids": res.NewFlowIDs})
-	return wire.InvokeToolResult{Content: injectSummary(ir, res.NewFlowIDs), StructuredContent: structured}, nil
+	summary, _ := json.Marshal(map[string]any{"summary": injectSummary(ir, res.NewFlowIDs), "new_flow_ids": res.NewFlowIDs})
+	return wire.InvokeToolResult{Result: summary}, nil
 }
 
 // injectFrame builds a frame, resolves the tunnel side, and sends it.

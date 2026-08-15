@@ -54,14 +54,14 @@ func (h *Handler) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeToolResult, 
 	}
 	ir, err := parseInjection(p.Arguments)
 	if err != nil {
-		return wire.InvokeToolResult{IsError: true, Content: err.Error()}, nil
+		return wire.InvokeToolResult{IsError: true, Result: toolErr(err)}, nil
 	}
 	res, reused, err := h.injectObject(h.baseCtx, ir)
 	if err != nil {
-		return wire.InvokeToolResult{IsError: true, Content: err.Error()}, nil
+		return wire.InvokeToolResult{IsError: true, Result: toolErr(err)}, nil
 	}
-	structured, _ := json.Marshal(map[string]any{"new_flow_ids": res.NewFlowIDs})
-	return wire.InvokeToolResult{Content: injectSummary(ir, res.NewFlowIDs, reused), StructuredContent: structured}, nil
+	summary, _ := json.Marshal(map[string]any{"summary": injectSummary(ir, res.NewFlowIDs, reused), "new_flow_ids": res.NewFlowIDs})
+	return wire.InvokeToolResult{Result: summary}, nil
 }
 
 // injectObject builds and sends the inner request through the named live tunnel when
@@ -185,6 +185,12 @@ func (h *Handler) injectionMachineKey(asMachine string) (key.MachinePrivate, err
 		return key.MachinePrivate{}, fmt.Errorf("inject: parse as_machine: %w", err)
 	}
 	return k, nil
+}
+
+// toolErr wraps an injection error as the Result object's message field.
+func toolErr(err error) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{"error": err.Error()})
+	return b
 }
 
 func parseInjection(raw json.RawMessage) (injectionRequest, error) {

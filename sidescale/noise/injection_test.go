@@ -103,15 +103,16 @@ func TestOnInvokeTool(t *testing.T) {
 		res, err := h.OnInvokeTool(wire.InvokeToolParams{Name: InjectToolName, Arguments: args})
 		require.NoError(t, err)
 		require.False(t, res.IsError)
-		assert.Contains(t, res.Content, "live tunnel tunnelX")
 
-		var structured struct {
+		var result struct {
+			Summary    string   `json:"summary"`
 			NewFlowIDs []string `json:"new_flow_ids"`
 		}
-		require.NoError(t, json.Unmarshal(res.StructuredContent, &structured))
-		require.Len(t, structured.NewFlowIDs, 1)
+		require.NoError(t, json.Unmarshal(res.Result, &result))
+		assert.Contains(t, result.Summary, "live tunnel tunnelX")
+		require.Len(t, result.NewFlowIDs, 1)
 
-		produced, ok := flows.Get(structured.NewFlowIDs[0])
+		produced, ok := flows.Get(result.NewFlowIDs[0])
 		require.True(t, ok)
 		// an originated flow has no source, so no parent
 		assert.Empty(t, produced.ParentFlowID)
@@ -141,15 +142,16 @@ func TestOnInvokeTool(t *testing.T) {
 		res, err := h.OnInvokeTool(wire.InvokeToolParams{Name: InjectToolName, Arguments: args})
 		require.NoError(t, err)
 		require.False(t, res.IsError)
-		assert.Contains(t, res.Content, "a fresh tunnel") // tunnel_id ignored without reuse_tunnel
 
-		var structured struct {
+		var result struct {
+			Summary    string   `json:"summary"`
 			NewFlowIDs []string `json:"new_flow_ids"`
 		}
-		require.NoError(t, json.Unmarshal(res.StructuredContent, &structured))
-		require.Len(t, structured.NewFlowIDs, 1)
+		require.NoError(t, json.Unmarshal(res.Result, &result))
+		assert.Contains(t, result.Summary, "a fresh tunnel") // tunnel_id ignored without reuse_tunnel
+		require.Len(t, result.NewFlowIDs, 1)
 
-		produced, ok := flows.Get(structured.NewFlowIDs[0])
+		produced, ok := flows.Get(result.NewFlowIDs[0])
 		require.True(t, ok)
 		assert.Equal(t, true, produced.Annotations["injected"])
 		assert.Nil(t, produced.Annotations["disturbs_live_node"]) // fresh tunnel, live client untouched
@@ -174,12 +176,12 @@ func TestOnInvokeTool(t *testing.T) {
 		require.NoError(t, err)
 		require.False(t, res.IsError)
 
-		var structured struct {
+		var result struct {
 			NewFlowIDs []string `json:"new_flow_ids"`
 		}
-		require.NoError(t, json.Unmarshal(res.StructuredContent, &structured))
-		require.Len(t, structured.NewFlowIDs, 1)
-		parentID := structured.NewFlowIDs[0]
+		require.NoError(t, json.Unmarshal(res.Result, &result))
+		require.Len(t, result.NewFlowIDs, 1)
+		parentID := result.NewFlowIDs[0]
 
 		require.Eventually(t, func() bool {
 			return len(streamChildren(flows.list(), parentID)) == 1
