@@ -10,9 +10,9 @@
 
 [go-appsec/toolbox](https://github.com/go-appsec/toolbox) provides `sectool`, an MCP-driven proxy for security testing. It sits in front of an application, captures each request and response as a *flow*, and exposes tools (`proxy_poll`, `flow_get`, `replay_send`, `proxy_rule_add`, `diff_flow`, and more) that an agent uses to inspect, mutate, and replay that traffic. Out of the box it understands HTTP.
 
-A *sidecar* extends sectool to a protocol it does not natively speak. The sidecar terminates the protocol, turns its messages into the same HTTP-shaped flows sectool already works with, and forwards them upstream. Every sectool tool then applies to that protocol unchanged.
+A *sidecar* extends sectool to a protocol it does not natively speak. The sidecar terminates the protocol, turns its messages into the same HTTP-shaped flows sectool already works with, and forwards them upstream.
 
-`sidescale` is the sidecar for Tailscale. Tailscale wraps its control traffic in an end-to-end encrypted Noise tunnel, so an ordinary proxy sees only opaque bytes. `sidescale` sits between a Tailscale client and the control server and terminates the Noise tunnel on both sides: to the client it acts as the control server, to the server it acts as a client. That puts the decrypted inner traffic in its hands, and each inner request and response lands in sectool as a normal flow you can capture, mutate, and replay.
+Tailscale wraps its control traffic in an end-to-end encrypted Noise tunnel, so an ordinary proxy sees only opaque bytes. `sidescale` sits between a Tailscale client and the control server and terminates the Noise tunnel on both sides: to the client it acts as the control server, to the server it acts as a client. That puts the decrypted inner traffic in its hands, and each inner request and response lands in sectool as a normal flow you can capture, mutate, and replay.
 
 One `sidescale` process covers two Tailscale surfaces:
 
@@ -50,12 +50,12 @@ Because the flows are HTTP-shaped, agents use sectool's existing tools unchanged
 ### 1. Build
 
 ```bash
-make build          # builds bin/sidescale (Linux)
+make build
 ```
 
 ### 2. Enable sidecars in sectool
 
-Sidecars are off by default. Enable them in `~/.sectool/config.json`, then start sectool with a workflow selected (the sidecar's setup handshake needs one):
+Sidecars are off by default. Enable them in `~/.sectool/config.json`, then start sectool:
 
 ```bash
 tmp=$(mktemp); jq '.sidecars.enabled = true' ~/.sectool/config.json > "$tmp" && mv "$tmp" ~/.sectool/config.json
@@ -68,11 +68,9 @@ sectool mcp --workflow none
 bin/sidescale -config /path/to/sidescale.json
 ```
 
-`sidescale` resolves sectool's socket at `~/.sectool/sidecar.sock` by default. Override it with `-sidecar-socket` or the config's `sectool.socket` field.
-
 ### 4. Start order
 
-Start sectool, then sidescale, then the client. The Tailscale client caches the server's Noise key on its first `/key` fetch and never refetches on the hot path, so both must be up before the client makes first contact. If the client connected first, restart it (`tailscale down` / `up`).
+Start sectool, then sidescale, then the client. The Tailscale client caches the server's Noise key on its first `/key` fetch and never re-fetches on the hot path, so both must be up before the client makes first contact. If the client connected first, restart it (`tailscale down` / `up`).
 
 ## Configuration
 
