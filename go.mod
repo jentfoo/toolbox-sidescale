@@ -9,7 +9,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
 	golang.org/x/net v0.58.0
-	tailscale.com v1.102.3
+	tailscale.com v1.102.4
 )
 
 require (
