@@ -109,9 +109,9 @@ func TestHealUpstream(t *testing.T) {
 	t.Run("heals_and_swaps", func(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
 		var calls int32
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
 			atomic.AddInt32(&calls, 1)
-			return fakeUpstreamConn(t, h, host, version, okSrv()), nil
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
 		at := deadTunnel(t, h, ver)
 		dead, _ := at.current()
@@ -142,10 +142,10 @@ func TestHealUpstream(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
 		var calls int32
 		release := make(chan struct{})
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
 			atomic.AddInt32(&calls, 1)
 			<-release // hold the dial so every healer contends
-			return fakeUpstreamConn(t, h, host, version, okSrv()), nil
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
 		at := deadTunnel(t, h, ver)
 		dead, _ := at.current()
@@ -175,8 +175,8 @@ func TestHealUpstream(t *testing.T) {
 
 	t.Run("fresh_tunnel_cleanup_releases_healed", func(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
-			return fakeUpstreamConn(t, h, host, version, okSrv()), nil
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
 		at, cleanup, err := h.openFreshTunnel(t.Context(), "ctrl.example", key.NewMachine(), ver, h.dedicatedPoolSession())
 		require.NoError(t, err)
@@ -198,11 +198,11 @@ func TestHealUpstream(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
 		var fail atomic.Bool
 		fail.Store(true)
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
 			if fail.Load() {
 				return nil, errors.New("dial boom")
 			}
-			return fakeUpstreamConn(t, h, host, version, okSrv()), nil
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
 		at := deadTunnel(t, h, ver)
 		dead, _ := at.current()

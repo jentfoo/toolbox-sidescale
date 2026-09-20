@@ -109,8 +109,8 @@ func (h *Handler) runTunnel(ctx context.Context, sc *sidecar.StreamConn, init []
 		return
 	}
 	// complete the envelope on every subsequent exit so it is never left in-flight;
-	// teardown must not ride the base context, which may be cancelled
-	defer func() { _ = h.conn.CompleteFlow(context.Background(), tunnelID, nil, time.Now()) }()
+	// teardown rides the stream's connection context, which outlives any request scope
+	defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
 
 	at.flowID = tunnelID
 	h.registerTunnel(tunnelID, at)
@@ -130,7 +130,7 @@ func (h *Handler) runTunnel(ctx context.Context, sc *sidecar.StreamConn, init []
 		}
 	}
 
-	_ = h.conn.Log("info", "tunnel established", map[string]any{"flow_id": tunnelID, "control_host": controlHost})
+	_ = h.conn.Log("info", "tunnel established", map[string]any{adapter.FieldFlowID: tunnelID, "control_host": controlHost})
 	u.uc.bridge.ServeCapture(innerClient, h.captureInner(ctx, at))
 }
 
@@ -275,7 +275,7 @@ func (h *Handler) healUpstream(ctx context.Context, at *activeTunnel, dead *shar
 		at.healFailed = true
 		at.mu.Unlock()
 		if firstFail { // one-shot: name the wedge once, not per failed poll
-			_ = h.conn.Log("warn", "upstream heal dial failed", map[string]any{"flow_id": at.flowID, "error": err.Error()})
+			_ = h.conn.Log("warn", "upstream heal dial failed", map[string]any{adapter.FieldFlowID: at.flowID, adapter.FieldError: err.Error()})
 		}
 		return
 	}
@@ -289,7 +289,7 @@ func (h *Handler) healUpstream(ctx context.Context, at *activeTunnel, dead *shar
 	at.up, at.bridge, at.healFailed = fresh, fresh.uc.bridge, false
 	at.mu.Unlock()
 	h.releaseUpstream(dead) // return the ref the tunnel held on the dead conn
-	_ = h.conn.Log("info", "upstream healed", map[string]any{"flow_id": at.flowID, "stream": fresh.uc.streamID})
+	_ = h.conn.Log("info", "upstream healed", map[string]any{adapter.FieldFlowID: at.flowID, adapter.FieldStream: fresh.uc.streamID})
 }
 
 func (h *Handler) registerTunnel(id string, t *activeTunnel) {
@@ -347,8 +347,8 @@ func (h *Handler) openFreshTunnel(ctx context.Context, controlHost string, machi
 	h.registerTunnel(tunnelID, at)
 	cleanup := func() {
 		h.deregisterTunnel(tunnelID)
-		// teardown must not ride the request context, which may be cancelled
-		_ = h.conn.CompleteFlow(context.Background(), tunnelID, nil, time.Now())
+		// teardown rides the connection context rooted by the caller
+		_ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now())
 		// release the current upstream, which may have healed onto a fresh conn
 		cur, _ := at.current()
 		h.releaseUpstream(cur)
@@ -496,8 +496,8 @@ func (h *Handler) emitTunnelEnvelope(ctx context.Context, in envelopeInfo) (stri
 // the native proxy (attributable, outside any client-facing substitution).
 func fetchKeyBody(ctx context.Context, conn keyFetcher, scheme, authority string, version uint16) ([]byte, error) {
 	target, err := json.Marshal(map[string]string{
-		"url":    scheme + "://" + authority + "/key?v=" + strconv.Itoa(int(version)),
-		"method": "GET",
+		"url":               scheme + "://" + authority + "/key?v=" + strconv.Itoa(int(version)),
+		adapter.FieldMethod: "GET",
 	})
 	if err != nil {
 		return nil, err
@@ -524,7 +524,7 @@ type keyFetcher interface {
 
 func (h *Handler) tunnelError(streamID, stage string, err error) {
 	_ = h.conn.Log("error", "tunnel failed: "+stage,
-		map[string]any{"stream": streamID, "error": err.Error()})
+		map[string]any{adapter.FieldStream: streamID, adapter.FieldError: err.Error()})
 }
 
 // prefixedConn reads through a buffered reader wrapping Conn so bytes buffered

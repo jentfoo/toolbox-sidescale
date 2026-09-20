@@ -13,6 +13,7 @@ import (
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/adapter"
+	"github.com/jentfoo/toolbox-sidescale/sidescale/tsproto"
 )
 
 // InjectToolName is the sidecar-registered MCP tool that originates a control request into an active or fresh tunnel.
@@ -104,7 +105,7 @@ func (h *Handler) injectObject(ctx context.Context, ir injectionRequest) (wire.S
 			if release, ok := h.tryAcquireUpstream(up); ok {
 				at, cleanup, disturbsLive = t, release, true
 				_ = h.conn.Log("warn", "inject riding live tunnel; client map may pause",
-					map[string]any{"tunnel_id": ir.TunnelID})
+					map[string]any{adapter.FieldTunnelID: ir.TunnelID})
 			}
 		}
 	}
@@ -189,7 +190,7 @@ func (h *Handler) injectionMachineKey(asMachine string) (key.MachinePrivate, err
 
 // toolErr wraps an injection error as the Result object's message field.
 func toolErr(err error) json.RawMessage {
-	b, _ := json.Marshal(map[string]any{"error": err.Error()})
+	b, _ := json.Marshal(map[string]any{adapter.FieldError: err.Error()})
 	return b
 }
 
@@ -209,10 +210,10 @@ func parseInjection(raw json.RawMessage) (injectionRequest, error) {
 func injectionHeaders(method, path, authority string, hdr map[string]string) []wire.Header {
 	out := make([]wire.Header, 0, 4+len(hdr))
 	out = append(out,
-		wire.Header{Name: ":method", Value: method},
-		wire.Header{Name: ":path", Value: path},
-		wire.Header{Name: ":authority", Value: authority},
-		wire.Header{Name: ":scheme", Value: "https"},
+		wire.Header{Name: tsproto.HdrMethod, Value: method},
+		wire.Header{Name: tsproto.HdrPath, Value: path},
+		wire.Header{Name: tsproto.HdrAuthority, Value: authority},
+		wire.Header{Name: tsproto.HdrScheme, Value: "https"},
 	)
 	for k, v := range hdr {
 		out = append(out, wire.Header{Name: k, Value: v})

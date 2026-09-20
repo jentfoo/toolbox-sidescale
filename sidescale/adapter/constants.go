@@ -12,3 +12,13 @@ const AnnInjected = "injected"
 
 // AnnDisturbsLiveNode marks an originated flow that rode a live client's tunnel and may pause its session.
 const AnnDisturbsLiveNode = "disturbs_live_node"
+
+// Field* are map field keys for log and tool payloads.
+const (
+	FieldError    = "error"
+	FieldStream   = "stream"
+	FieldFlowID   = "flow_id"
+	FieldTunnelID = "tunnel_id"
+	FieldMethod   = "method"
+	FieldPath     = "path"
+)

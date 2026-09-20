@@ -132,8 +132,7 @@ func (r *mapStreamReader) finish() {
 		return
 	}
 	r.finished = true
-	// teardown must not ride r.ctx (the base context), which may be cancelled
-	_ = r.h.conn.CompleteFlow(context.Background(), r.parentID, nil, time.Now())
+	_ = r.h.conn.CompleteFlow(r.ctx, r.parentID, nil, time.Now())
 }
 
 // compressedHeaders returns the compressed-frame metadata headers for a chunk: the

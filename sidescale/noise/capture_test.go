@@ -31,7 +31,7 @@ func TestCaptureRequest(t *testing.T) {
 
 	cfg, err := defaultControlConfig()
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "https://controlplane.tailscale.com/machine/register", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://controlplane.tailscale.com/machine/register", nil)
 	body := []byte(`{"Hostinfo":{"OS":"linux"}}`)
 
 	t.Run("no_rule_emits_single_flow", func(t *testing.T) {
@@ -72,7 +72,7 @@ func TestCaptureRequest(t *testing.T) {
 		rules := stubRules{rules: []wire.Rule{{RuleID: "h1", Type: "request_header", Find: "X-Old", Replace: "X-New"}}}
 		h := testHandler(t, &cfg, flows, noopCore{}, rules, scsidecar.Config{})
 
-		r := httptest.NewRequest(http.MethodPost, "https://controlplane.tailscale.com/machine/register", nil)
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://controlplane.tailscale.com/machine/register", nil)
 		r.Header.Set("X-Old", "v")
 		_, fwdHeaders, err := h.captureRequest(t.Context(), "tunnel1", r, requestHeaders(r), body)
 		require.NoError(t, err)
@@ -137,7 +137,7 @@ func TestCaptureInnerStreamParent(t *testing.T) {
 
 	mapFrame := tsproto.EncodeMapResponseFrame([]byte(`{"Node":{"Name":"a"}}`), true)
 	streamReq := func() *http.Request {
-		return httptest.NewRequest(http.MethodPost, "https://ctrl.example/machine/map", bytes.NewReader([]byte(`{"Stream":true}`)))
+		return httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://ctrl.example/machine/map", bytes.NewReader([]byte(`{"Stream":true}`)))
 	}
 	// stream flows whose structural parent is the tunnel are the parent-level flows (the
 	// captured anchor and, on a header-rule hit, the mutated twin); chunk children hang
@@ -199,7 +199,7 @@ func TestCaptureInnerStreamParent(t *testing.T) {
 func TestRequestHeaders(t *testing.T) {
 	t.Parallel()
 
-	req := httptest.NewRequest(http.MethodPost, "https://ctrl.example/machine/map", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://ctrl.example/machine/map", nil)
 	req.Header.Set("X-Test", "v")
 	hdrs := requestHeaders(req)
 

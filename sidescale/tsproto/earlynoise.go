@@ -53,15 +53,17 @@ func ReadEarlyNoise(br *bufio.Reader) (raw []byte, n *tailcfg.EarlyNoise, ok boo
 	if length > maxEarlyNoiseBytes {
 		return nil, nil, false, fmt.Errorf("tsproto: early noise length %d exceeds max %d", length, maxEarlyNoiseBytes)
 	}
-	payload := make([]byte, length)
-	if _, err := io.ReadFull(br, payload); err != nil {
+	// frame is one buffer sized up front so the header and payload are contiguous
+	frame := make([]byte, earlyNoiseHeaderLen+int(length))
+	copy(frame[:earlyNoiseHeaderLen], hdr)
+	if _, err := io.ReadFull(br, frame[earlyNoiseHeaderLen:]); err != nil {
 		return nil, nil, false, err
 	}
 	var msg tailcfg.EarlyNoise
-	if err := json.Unmarshal(payload, &msg); err != nil {
+	if err := json.Unmarshal(frame[earlyNoiseHeaderLen:], &msg); err != nil {
 		return nil, nil, false, err
 	}
-	return append(hdr, payload...), &msg, true, nil
+	return frame, &msg, true, nil
 }
 
 // DecodeEarlyNoise parses an EarlyNoise frame and returns the message plus the

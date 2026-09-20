@@ -110,7 +110,7 @@ func (h *Handler) getOrCreateUpstream(ctx context.Context, host string, machineK
 		h.mu.Unlock()
 		close(ready)
 		_ = h.conn.Log("info", "upstream connected", map[string]any{
-			"stream": uc.streamID, "upstream": uc.addr,
+			adapter.FieldStream: uc.streamID, "upstream": uc.addr,
 			"machine_key": adapter.KeyPrefix(k.id.String()), "pool_session": k.session,
 		})
 		return u, nil
@@ -191,7 +191,7 @@ func (h *Handler) evictUpstream(u *sharedUpstream, reason string) {
 	streamID, addr := u.uc.streamID, u.uc.addr // read under lock; uc is stable once dialed
 	h.mu.Unlock()
 	_ = h.conn.Log("warn", "upstream conn evicted (unusable)", map[string]any{
-		"stream": streamID, "upstream": addr,
+		adapter.FieldStream: streamID, "upstream": addr,
 		"machine_key": adapter.KeyPrefix(u.key.id.String()), "pool_session": u.key.session, "reason": reason,
 	})
 	u.uc.close()

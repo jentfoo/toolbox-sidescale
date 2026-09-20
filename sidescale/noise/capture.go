@@ -49,7 +49,7 @@ func (h *Handler) captureInner(ctx context.Context, at *activeTunnel) tsproto.Ca
 		}
 		// per-request feedback, mirroring sectool's proxy request logging
 		_ = h.conn.Log("info", "control request", map[string]any{
-			"method": req.Method, "path": req.URL.Path, "tunnel_id": at.flowID,
+			adapter.FieldMethod: req.Method, adapter.FieldPath: req.URL.Path, adapter.FieldTunnelID: at.flowID,
 			"status": resp.StatusCode, "dur_ms": time.Since(fwdStart).Milliseconds(),
 		})
 
@@ -91,7 +91,8 @@ func (h *Handler) captureInner(ctx context.Context, at *activeTunnel) tsproto.Ca
 // and returns the error so the bridge relays a 502 to the client.
 func (h *Handler) captureError(at *activeTunnel, req *http.Request, stage string, err error) error {
 	_ = h.conn.Log("error", "inner capture failed: "+stage, map[string]any{
-		"method": req.Method, "path": req.URL.Path, "tunnel_id": at.flowID, "error": err.Error(),
+		adapter.FieldMethod: req.Method, adapter.FieldPath: req.URL.Path, adapter.FieldTunnelID: at.flowID,
+		adapter.FieldError: err.Error(),
 	})
 	return err
 }
@@ -186,17 +187,17 @@ var hopHeaders = map[string]struct{}{
 // headers (pseudo-headers prefixed with ':').
 func requestHeaders(req *http.Request) []wire.Header {
 	out := []wire.Header{
-		{Name: ":method", Value: req.Method},
-		{Name: ":path", Value: req.URL.RequestURI()},
-		{Name: ":authority", Value: req.Host},
-		{Name: ":scheme", Value: "https"},
+		{Name: tsproto.HdrMethod, Value: req.Method},
+		{Name: tsproto.HdrPath, Value: req.URL.RequestURI()},
+		{Name: tsproto.HdrAuthority, Value: req.Host},
+		{Name: tsproto.HdrScheme, Value: "https"},
 	}
 	return appendHTTPHeaders(out, req.Header)
 }
 
 // responseHeaders renders the response status pseudo-header plus regular headers.
 func responseHeaders(resp *http.Response) []wire.Header {
-	out := []wire.Header{{Name: ":status", Value: strconv.Itoa(resp.StatusCode)}}
+	out := []wire.Header{{Name: tsproto.HdrStatus, Value: strconv.Itoa(resp.StatusCode)}}
 	return appendHTTPHeaders(out, resp.Header)
 }
 
@@ -229,9 +230,9 @@ func buildUpstreamRequest(ctx context.Context, controlHost string, headers []wir
 	hdr := http.Header{}
 	for _, h := range headers {
 		switch {
-		case h.Name == ":method":
+		case h.Name == tsproto.HdrMethod:
 			method = h.Value
-		case h.Name == ":path":
+		case h.Name == tsproto.HdrPath:
 			path = h.Value
 		case strings.HasPrefix(h.Name, ":"):
 			// other pseudo-headers are derived from the URL

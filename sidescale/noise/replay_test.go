@@ -279,13 +279,9 @@ func TestReplay(t *testing.T) {
 		liveUp := at.up
 
 		var calls int32
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
 			atomic.AddInt32(&calls, 1)
-			return fakeUpstreamConn(t, h, host, version, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, registerEndpoint, r.URL.Path)
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"MachineAuthorized":true}`))
-			})), nil
+			return fakeUpstreamConn(ctx, t, h, host, version, registerEndpointOK(t)), nil
 		}
 
 		src := &wire.Flow{
@@ -370,8 +366,8 @@ func TestSelectTunnel(t *testing.T) {
 	t.Run("register_forces_dedicated_fresh", func(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
 		existing := fakeTunnel(t, h, "tunnelX", okSrv())
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
-			return fakeUpstreamConn(t, h, host, version, okSrv()), nil
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
 		at, cleanup, cross, err := h.selectTunnel(t.Context(), "tunnelX", registerEndpoint, ver)
 		require.NoError(t, err)
@@ -396,9 +392,9 @@ func TestSelectTunnel(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
 
 		var gotVersion uint16
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
 			gotVersion = version
-			return fakeUpstreamConn(t, h, host, version, okSrv()), nil
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
 		at, cleanup, cross, err := h.selectTunnel(t.Context(), "no-such-tunnel", mapEndpoint, 140)
 		require.NoError(t, err)

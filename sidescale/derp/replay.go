@@ -144,7 +144,7 @@ func (h *Handler) openFreshUpstream(ctx context.Context, host string) (*sendTarg
 	}
 	cleanup := func() {
 		up.close()
-		_ = h.conn.CompleteFlow(context.Background(), tunnelID, nil, time.Now())
+		_ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now())
 	}
 	return &sendTarget{
 		flowID:      tunnelID,

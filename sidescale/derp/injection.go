@@ -18,7 +18,7 @@ import (
 
 // toolErr wraps an injection error as the Result object's message field.
 func toolErr(err error) json.RawMessage {
-	b, _ := json.Marshal(map[string]any{"error": err.Error()})
+	b, _ := json.Marshal(map[string]any{adapter.FieldError: err.Error()})
 	return b
 }
 

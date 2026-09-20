@@ -15,6 +15,7 @@ import (
 	"github.com/go-appsec/toolbox/pkg/addr"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
+	"github.com/jentfoo/toolbox-sidescale/sidescale/adapter"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/noise/bindings"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/tsproto"
 )
@@ -111,7 +112,7 @@ func (h *Handler) ServeStream(ctx context.Context, sc *sidecar.StreamConn) {
 	case p.Path == ts2021Path:
 		init, err := handshakeInit(p.RequestHeaders)
 		if err != nil {
-			_ = h.conn.Log("error", "ts2021: initiation header", map[string]any{"stream": p.StreamID, "error": err.Error()})
+			_ = h.conn.Log("error", "ts2021: initiation header", map[string]any{adapter.FieldStream: p.StreamID, adapter.FieldError: err.Error()})
 			_ = sc.Close()
 			return
 		}

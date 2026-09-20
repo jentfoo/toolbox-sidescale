@@ -16,6 +16,7 @@ import (
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 
+	"github.com/jentfoo/toolbox-sidescale/sidescale/adapter"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/tsproto"
 )
 
@@ -78,12 +79,12 @@ func (ks *keySubstituter) registerResponder(ctx context.Context, body []byte) (s
 		origin += ":" + strconv.Itoa(ks.clientPort)
 	}
 	res, err := ks.h.conn.CoreInvoke(ctx, "proxy_respond_add", map[string]any{
-		"origin":      origin,
-		"path":        "/key",
-		"method":      http.MethodGet,
-		"status_code": http.StatusOK,
-		"headers":     map[string]string{"Content-Type": "application/json"},
-		"body":        string(body),
+		"origin":            origin,
+		adapter.FieldPath:   "/key",
+		adapter.FieldMethod: http.MethodGet,
+		"status_code":       http.StatusOK,
+		"headers":           map[string]string{"Content-Type": "application/json"},
+		"body":              string(body),
 	})
 	if err != nil {
 		return "", err
@@ -183,7 +184,7 @@ func (ks *keySubstituter) serveKey(ctx context.Context, conn net.Conn, streamID 
 	}
 	_ = req.Body.Close()
 	if req.Method != http.MethodGet || !strings.HasPrefix(req.URL.Path, "/key") {
-		_ = ks.h.conn.Log("warn", "keysub: unexpected request on control claim", map[string]any{"method": req.Method, "path": req.URL.Path})
+		_ = ks.h.conn.Log("warn", "keysub: unexpected request on control claim", map[string]any{adapter.FieldMethod: req.Method, adapter.FieldPath: req.URL.Path})
 		writeHTTPResponse(conn, http.StatusMisdirectedRequest, "text/plain", []byte("unsupported on control claim"))
 		return
 	}

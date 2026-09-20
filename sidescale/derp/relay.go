@@ -78,7 +78,9 @@ func (h *Handler) runTerminate(ctx context.Context, client *sidecar.StreamConn) 
 		h.tunnelError(p.StreamID, "tunnel envelope", err)
 		return
 	}
-	defer func() { _ = h.conn.CompleteFlow(context.Background(), tunnelID, nil, time.Now()) }()
+	// complete the envelope on every subsequent exit so it is never left in-flight;
+	// teardown rides the stream's connection context
+	defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
 
 	if err := clientFr.WriteFrame(derpproto.FrameServerInfo, siPayload); err != nil {
 		h.tunnelError(p.StreamID, "write server info", err)
@@ -93,9 +95,9 @@ func (h *Handler) runTerminate(ctx context.Context, client *sidecar.StreamConn) 
 	}
 
 	c := h.relay.register(clientPub, clientFr, tunnelID, !clientInfo.MeshKey.IsZero())
-	defer h.relay.remove(context.Background(), c)
+	defer h.relay.remove(ctx, c)
 
-	_ = h.conn.Log("info", "derp synthetic client joined", map[string]any{"flow_id": tunnelID, "node": clientPub.String()})
+	_ = h.conn.Log("info", "derp synthetic client joined", map[string]any{adapter.FieldFlowID: tunnelID, "node": clientPub.String()})
 
 	stop := make(chan struct{})
 	go h.terminateKeepAlive(ctx, tunnelID, clientFr, stop)

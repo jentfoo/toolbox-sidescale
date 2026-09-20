@@ -22,7 +22,7 @@ import (
 
 // pairedNoiseConn returns a live upstream-side controlbase.Conn from a completed IK
 // handshake over an in-memory pipe, so upstreamConn teardown exercises real Close paths.
-func pairedNoiseConn(t *testing.T, version uint16) *controlbase.Conn {
+func pairedNoiseConn(ctx context.Context, t *testing.T, version uint16) *controlbase.Conn {
 	t.Helper()
 
 	c1, c2 := net.Pipe()
@@ -32,14 +32,14 @@ func pairedNoiseConn(t *testing.T, version uint16) *controlbase.Conn {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = controlbase.Server(t.Context(), c2, serverKey, nil)
+		_, _ = controlbase.Server(ctx, c2, serverKey, nil)
 		close(done)
 	}()
 	initn, err := tsproto.Initiator(clientKey, serverKey.Public(), version)
 	require.NoError(t, err)
 	_, err = c1.Write(initn.Header)
 	require.NoError(t, err)
-	client, err := initn.Complete(t.Context(), c1)
+	client, err := initn.Complete(ctx, c1)
 	require.NoError(t, err)
 	<-done
 	return client
@@ -47,11 +47,11 @@ func pairedNoiseConn(t *testing.T, version uint16) *controlbase.Conn {
 
 // fakeUpstreamConn builds an upstreamConn backed by a live H2 bridge (serving srv) and
 // a real Noise inner conn, registered as a handler stream so teardown runs normally.
-func fakeUpstreamConn(t *testing.T, h *Handler, host string, version uint16, srv http.Handler) *upstreamConn {
+func fakeUpstreamConn(ctx context.Context, t *testing.T, h *Handler, host string, version uint16, srv http.Handler) *upstreamConn {
 	t.Helper()
 
 	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	ln, err := lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
@@ -62,7 +62,7 @@ func fakeUpstreamConn(t *testing.T, h *Handler, host string, version uint16, srv
 		(&http2.Server{}).ServeConn(conn, &http2.ServeConnOpts{Handler: srv})
 	}()
 	var d net.Dialer
-	upConn, err := d.DialContext(t.Context(), "tcp", ln.Addr().String())
+	upConn, err := d.DialContext(ctx, "tcp", ln.Addr().String())
 	require.NoError(t, err)
 	bridge, err := tsproto.NewH2Bridge(upConn)
 	require.NoError(t, err)
@@ -70,7 +70,7 @@ func fakeUpstreamConn(t *testing.T, h *Handler, host string, version uint16, srv
 	streamID := upConn.LocalAddr().String()
 	return &upstreamConn{
 		streamID:     streamID,
-		inner:        pairedNoiseConn(t, version),
+		inner:        pairedNoiseConn(ctx, t, version),
 		bridge:       bridge,
 		serverPub:    key.NewMachine().Public(),
 		serverLegacy: key.NewMachine().Public(),
@@ -82,11 +82,37 @@ func fakeUpstreamConn(t *testing.T, h *Handler, host string, version uint16, srv
 // starts at 1 to mirror production, where the owning tunnel always holds a ref.
 func fakeUpstream(t *testing.T, h *Handler, id key.MachinePublic, host string, version uint16, srv http.Handler) *sharedUpstream {
 	t.Helper()
-	return &sharedUpstream{key: poolKey{id: id, host: host, version: version}, uc: fakeUpstreamConn(t, h, host, version, srv), refs: 1}
+	return &sharedUpstream{key: poolKey{id: id, host: host, version: version}, uc: fakeUpstreamConn(t.Context(), t, h, host, version, srv), refs: 1}
 }
 
 func okSrv() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+}
+
+// registerOK answers a machine-register success with an authorized body.
+func registerOK() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"MachineAuthorized":true}`))
+	})
+}
+
+// versionRejected answers a machine-register with an unsupported-version 400.
+func versionRejected() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("unsupported client version"))
+	})
+}
+
+// registerEndpointOK asserts the request hit the register endpoint before answering success.
+func registerEndpointOK(t *testing.T) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, registerEndpoint, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"MachineAuthorized":true}`))
+	})
 }
 
 func TestGetOrCreateUpstream(t *testing.T) {
@@ -98,9 +124,9 @@ func TestGetOrCreateUpstream(t *testing.T) {
 	mk := key.NewMachine()
 
 	dialCounter := func(h *Handler, calls *int32) {
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
 			atomic.AddInt32(calls, 1)
-			return fakeUpstreamConn(t, h, host, version, okSrv()), nil
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
 	}
 
@@ -110,10 +136,10 @@ func TestGetOrCreateUpstream(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
 		var calls int32
 		release := make(chan struct{})
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
 			atomic.AddInt32(&calls, 1)
 			<-release // hold the dial open so every caller contends
-			return fakeUpstreamConn(t, h, host, version, okSrv()), nil
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
 
 		const n = 8

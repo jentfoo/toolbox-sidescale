@@ -9,6 +9,15 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// Inner HTTP/2 pseudo-header field names carried on captured control messages.
+const (
+	HdrMethod    = ":method"
+	HdrPath      = ":path"
+	HdrAuthority = ":authority"
+	HdrScheme    = ":scheme"
+	HdrStatus    = ":status"
+)
+
 // CaptureFunc handles one inner request from the client-facing side and returns the response to relay back.
 // The response Body is streamed to the client and closed by the bridge.
 type CaptureFunc func(req *http.Request) (*http.Response, error)

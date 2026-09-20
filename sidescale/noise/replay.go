@@ -149,7 +149,7 @@ func (h *Handler) selectTunnel(ctx context.Context, tunnelID, endpoint string, v
 // inject) rather than a freshly opened one. Precondition: at != nil.
 func sendFields(endpoint string, at *activeTunnel, reused bool) map[string]any {
 	return map[string]any{
-		"endpoint": endpoint, "tunnel_id": at.flowID, "reused": reused,
+		"endpoint": endpoint, adapter.FieldTunnelID: at.flowID, "reused": reused,
 		"machine_key": adapter.KeyPrefix(at.machineKey.Public().String()),
 		"upstream":    at.controlHost,
 	}
@@ -159,7 +159,7 @@ func sendFields(endpoint string, at *activeTunnel, reused bool) map[string]any {
 // tunnel is selected) and returns the error wrapped with the same context. op is "replay"
 // or "inject"; stage names the failing step.
 func (h *Handler) sendFailed(op, endpoint, stage string, at *activeTunnel, reused bool, err error) error {
-	f := map[string]any{"endpoint": endpoint, "stage": stage, "error": err.Error()}
+	f := map[string]any{"endpoint": endpoint, "stage": stage, adapter.FieldError: err.Error()}
 	var tunnelID string
 	if at != nil {
 		tunnelID = at.flowID
@@ -250,7 +250,7 @@ func (h *Handler) emitProduced(ctx context.Context, req *wire.FlowMessage, resp 
 		go func() {
 			reader := newMapStreamReader(ctx, h, resp.Body, parentID)
 			if _, cerr := io.Copy(io.Discard, reader); cerr != nil {
-				_ = h.conn.Log("error", "stream capture failed", map[string]any{"flow_id": parentID, "error": cerr.Error()})
+				_ = h.conn.Log("error", "stream capture failed", map[string]any{adapter.FieldFlowID: parentID, adapter.FieldError: cerr.Error()})
 			}
 			_ = reader.Close()
 			if cleanup != nil {
@@ -294,7 +294,7 @@ func (h *Handler) emitProduced(ctx context.Context, req *wire.FlowMessage, resp 
 // query (the common control endpoints). Run before ApplyMutations.
 func normalizePathQuery(msg *wire.FlowMessage) {
 	for i := range msg.Headers {
-		if msg.Headers[i].Name != ":path" {
+		if msg.Headers[i].Name != tsproto.HdrPath {
 			continue
 		}
 
@@ -313,7 +313,7 @@ func normalizePathQuery(msg *wire.FlowMessage) {
 // msg.Query is preserved by normalizePathQuery when no query mutation changed it, and is
 // forwarded verbatim rather than re-encoded, keeping wire fidelity on an unchanged replay.
 func syncPseudoHeaders(msg *wire.FlowMessage) {
-	setPseudoHeader(&msg.Headers, ":method", msg.Method)
+	setPseudoHeader(&msg.Headers, tsproto.HdrMethod, msg.Method)
 	if msg.Path == "" {
 		return
 	}
@@ -321,7 +321,7 @@ func syncPseudoHeaders(msg *wire.FlowMessage) {
 	if msg.Query != "" {
 		path += "?" + msg.Query
 	}
-	setPseudoHeader(&msg.Headers, ":path", path)
+	setPseudoHeader(&msg.Headers, tsproto.HdrPath, path)
 }
 
 func setPseudoHeader(headers *[]wire.Header, name, value string) {

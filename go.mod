@@ -3,7 +3,7 @@ module github.com/jentfoo/toolbox-sidescale
 go 1.26.6
 
 require (
-	github.com/go-analyze/bulk v0.1.5
+	github.com/go-analyze/bulk v0.1.6
 	github.com/go-appsec/toolbox v0.2.2
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1

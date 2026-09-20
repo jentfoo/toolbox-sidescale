@@ -131,11 +131,8 @@ func TestOnInvokeTool(t *testing.T) {
 		fakeTunnel(t, h, "tunnelX", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			t.Error("live tunnel handler must not be invoked")
 		}))
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
-			return fakeUpstreamConn(t, h, host, version, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"MachineAuthorized":true}`))
-			})), nil
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			return fakeUpstreamConn(ctx, t, h, host, version, registerOK()), nil
 		}
 
 		args := json.RawMessage(`{"tunnel_id":"tunnelX","endpoint":"/machine/register","body":{"Hostinfo":{"OS":"linux"}}}`)
@@ -196,12 +193,9 @@ func TestOnInvokeTool(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
 
 		var gotVersion uint16
-		h.dialFn = func(_ context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
 			gotVersion = version
-			return fakeUpstreamConn(t, h, host, version, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte("unsupported client version"))
-			})), nil
+			return fakeUpstreamConn(ctx, t, h, host, version, versionRejected()), nil
 		}
 
 		// body carries Version:140; as_version:90 must win for the initiation handshake

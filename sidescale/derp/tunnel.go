@@ -140,7 +140,7 @@ func (h *Handler) runTunnel(ctx context.Context, client *sidecar.StreamConn) {
 		h.tunnelError(p.StreamID, "tunnel envelope", err)
 		return
 	}
-	defer func() { _ = h.conn.CompleteFlow(context.Background(), tunnelID, nil, time.Now()) }()
+	defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
 
 	h.registerTunnel(tunnelID, &activeTunnel{
 		flowID:      tunnelID,
@@ -175,7 +175,7 @@ func (h *Handler) runTunnel(ctx context.Context, client *sidecar.StreamConn) {
 		_ = h.captureHandshakeFrame(ctx, tunnelID, derpproto.FrameServerInfo, up.serverPub, up.serverInfoBox, si, adapter.DirServerToClient)
 	}
 
-	_ = h.conn.Log("info", "derp tunnel established", map[string]any{"flow_id": tunnelID, "host": host})
+	_ = h.conn.Log("info", "derp tunnel established", map[string]any{adapter.FieldFlowID: tunnelID, "host": host})
 
 	// bridge frames both directions until either side closes
 	done := make(chan struct{}, 2)
@@ -308,7 +308,7 @@ func (h *Handler) openUpstream(ctx context.Context, host string, nodeKey key.Nod
 	ok = true
 
 	_ = h.conn.Log("info", "derp upstream connected", map[string]any{
-		"stream": streamID, "host": dialHost, "node_key": adapter.KeyPrefix(nodeKey.Public().String()),
+		adapter.FieldStream: streamID, "host": dialHost, "node_key": adapter.KeyPrefix(nodeKey.Public().String()),
 	})
 	return &upstreamTunnel{
 		streamID:      streamID,
@@ -423,7 +423,7 @@ func (h *Handler) emitTunnelEnvelope(ctx context.Context, in envelopeInfo) (stri
 
 func (h *Handler) tunnelError(streamID, stage string, err error) {
 	_ = h.conn.Log("error", "derp tunnel failed: "+stage,
-		map[string]any{"stream": streamID, "error": err.Error()})
+		map[string]any{adapter.FieldStream: streamID, adapter.FieldError: err.Error()})
 }
 
 // frameConn buffers a StreamConn's bytes into complete DERP frames on read and encodes frames on write.
