@@ -1,12 +1,11 @@
 package tsproto
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 // Inner HTTP/2 pseudo-header field names carried on captured control messages.
@@ -25,20 +24,28 @@ type CaptureFunc func(req *http.Request) (*http.Response, error)
 // H2Bridge bridges inner HTTP/2 between a client-facing connection (server side) and an
 // upstream connection (client side), both prior-knowledge HTTP/2 over a plaintext Noise byte stream.
 type H2Bridge struct {
-	upstream *http2.ClientConn
-	server   *http2.Server
+	upstream *http.ClientConn
 }
 
 // NewH2Bridge returns a bridge whose upstream client speaks over upstreamConn.
-func NewH2Bridge(upstreamConn net.Conn) (*H2Bridge, error) {
-	// keepalive PINGs: control closes an idle /ts2021 conn (~10s), which would break
-	// the ClientConn before the first inner request
-	tr := &http2.Transport{AllowHTTP: true, ReadIdleTimeout: 5 * time.Second}
-	cc, err := tr.NewClientConn(upstreamConn)
+// ctx scopes connection setup; the conn itself outlives it.
+func NewH2Bridge(ctx context.Context, upstreamConn net.Conn) (*H2Bridge, error) {
+	// explicit Protocols opts into h2c prior knowledge despite the custom dialer;
+	// keepalive PINGs: control closes an idle /ts2021 conn (~10s), which would
+	// break the ClientConn before the first inner request
+	tr := &http.Transport{
+		Protocols: &http.Protocols{},
+		HTTP2:     &http.HTTP2Config{SendPingTimeout: 5 * time.Second},
+	}
+	tr.Protocols.SetUnencryptedHTTP2(true)
+	tr.DialContext = func(context.Context, string, string) (net.Conn, error) {
+		return upstreamConn, nil
+	}
+	cc, err := tr.NewClientConn(ctx, "http", "noise-upstream:443")
 	if err != nil {
 		return nil, err
 	}
-	return &H2Bridge{upstream: cc, server: &http2.Server{}}, nil
+	return &H2Bridge{upstream: cc}, nil
 }
 
 // Forward sends req upstream and returns the response.
@@ -47,9 +54,10 @@ func (b *H2Bridge) Forward(req *http.Request) (*http.Response, error) {
 }
 
 // Usable reports whether the upstream connection can still serve requests.
+// A drained conn (GOAWAY) reads usable until it hard-closes, so forwardTunnel
+// heals one request after the server stops accepting new streams.
 func (b *H2Bridge) Usable() bool {
-	st := b.upstream.State()
-	return !st.Closed && !st.Closing
+	return b.upstream.Err() == nil
 }
 
 // Close shuts down the upstream HTTP/2 client connection.
@@ -57,9 +65,9 @@ func (b *H2Bridge) Close() error {
 	return b.upstream.Close()
 }
 
-// ServeCapture serves the client-facing side over clientConn,
-// routing each inner request through capture, until the connection closes
-func (b *H2Bridge) ServeCapture(clientConn net.Conn, capture CaptureFunc) {
+// ServeCapture serves the client-facing side over clientConn until the conn closes
+// or ctx is canceled, routing each inner request through capture
+func (b *H2Bridge) ServeCapture(ctx context.Context, clientConn net.Conn, capture CaptureFunc) {
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp, err := capture(r)
 		if err != nil {
@@ -75,8 +83,46 @@ func (b *H2Bridge) ServeCapture(clientConn net.Conn, capture CaptureFunc) {
 		w.WriteHeader(resp.StatusCode)
 		flushingCopy(w, resp.Body)
 	})
-	b.server.ServeConn(clientConn, &http2.ServeConnOpts{Handler: h})
+	_ = ServeH2Conn(ctx, clientConn, h)
 }
+
+// ServeH2Conn serves prior-knowledge HTTP/2 on conn until the conn closes or ctx is
+// canceled. Request contexts derive from ctx via the server BaseContext.
+func ServeH2Conn(ctx context.Context, conn net.Conn, h http.Handler) error {
+	srv := &http.Server{Handler: h, Protocols: &http.Protocols{}}
+	srv.Protocols.SetUnencryptedHTTP2(true)
+	srv.BaseContext = func(net.Listener) context.Context { return ctx }
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(&singleConnListener{conn: conn}) }()
+	select {
+	case err := <-served:
+		return err
+	case <-ctx.Done():
+		_ = conn.Close()
+		<-served
+		return ctx.Err()
+	}
+}
+
+// singleConnListener feeds one pre-established conn to http.Server.Serve;
+// subsequent Accepts report net.ErrClosed to end the serve loop.
+type singleConnListener struct {
+	conn net.Conn
+	used bool
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	if l.used {
+		return nil, net.ErrClosed
+	}
+	l.used = true
+	return l.conn, nil
+}
+
+// Close is a no-op, the caller owns the served conn.
+func (l *singleConnListener) Close() error { return nil }
+
+func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
 
 // flushingCopy relays src to w, flushing after each read so streamed frames reach the client promptly.
 func flushingCopy(w http.ResponseWriter, src io.Reader) {

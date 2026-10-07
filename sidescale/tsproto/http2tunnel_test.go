@@ -1,6 +1,7 @@
 package tsproto
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/http2"
 )
 
 func TestH2Bridge(t *testing.T) {
@@ -26,20 +26,18 @@ func TestH2Bridge(t *testing.T) {
 		if aerr != nil {
 			return
 		}
-		(&http2.Server{}).ServeConn(conn, &http2.ServeConnOpts{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				w.Header().Set("X-Upstream", "seen")
-				w.WriteHeader(http.StatusOK)
-				_, _ = fmt.Fprintf(w, "%s %s bytes=%d probe=%s", r.Method, r.URL.Path, len(body), r.Header.Get("X-Probe"))
-			}),
-		})
+		_ = ServeH2Conn(t.Context(), conn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			w.Header().Set("X-Upstream", "seen")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, "%s %s bytes=%d probe=%s", r.Method, r.URL.Path, len(body), r.Header.Get("X-Probe"))
+		}))
 	}()
 
 	var d net.Dialer
 	upConn, err := d.DialContext(t.Context(), "tcp", upLn.Addr().String())
 	require.NoError(t, err)
-	bridge, err := NewH2Bridge(upConn)
+	bridge, err := NewH2Bridge(t.Context(), upConn)
 	require.NoError(t, err)
 
 	// client-facing side: ServeCapture forwards each request upstream verbatim
@@ -52,7 +50,7 @@ func TestH2Bridge(t *testing.T) {
 		if aerr != nil {
 			return
 		}
-		bridge.ServeCapture(conn, func(req *http.Request) (*http.Response, error) {
+		bridge.ServeCapture(t.Context(), conn, func(req *http.Request) (*http.Response, error) {
 			out, oerr := http.NewRequestWithContext(req.Context(), req.Method, "http://upstream"+req.URL.Path, req.Body)
 			if oerr != nil {
 				return nil, oerr
@@ -65,13 +63,16 @@ func TestH2Bridge(t *testing.T) {
 	var clDialer net.Dialer
 	clConn, err := clDialer.DialContext(t.Context(), "tcp", clLn.Addr().String())
 	require.NoError(t, err)
-	cc, err := (&http2.Transport{AllowHTTP: true}).NewClientConn(clConn)
+	clTr := &http.Transport{Protocols: &http.Protocols{}}
+	clTr.Protocols.SetUnencryptedHTTP2(true)
+	clTr.DialContext = func(context.Context, string, string) (net.Conn, error) { return clConn, nil }
+	cc, err := clTr.NewClientConn(t.Context(), "http", "client:443")
 	require.NoError(t, err)
 
 	req, err := http.NewRequestWithContext(t.Context(), "POST", "http://client/machine/register", strings.NewReader("hello-body"))
 	require.NoError(t, err)
 	req.Header.Set("X-Probe", "p1")
-	req.URL.Scheme = "https" // ClientConn round-trip requires a scheme
+	req.URL.Scheme = "https" // scheme feeds the h2 :scheme pseudo-header
 
 	resp, err := cc.RoundTrip(req)
 	require.NoError(t, err)
