@@ -11,7 +11,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/http2"
 
 	"tailscale.com/control/controlbase"
 	"tailscale.com/types/key"
@@ -59,12 +58,12 @@ func fakeUpstreamConn(ctx context.Context, t *testing.T, h *Handler, host string
 		if aerr != nil {
 			return
 		}
-		(&http2.Server{}).ServeConn(conn, &http2.ServeConnOpts{Handler: srv})
+		_ = tsproto.ServeH2Conn(ctx, conn, srv)
 	}()
 	var d net.Dialer
 	upConn, err := d.DialContext(ctx, "tcp", ln.Addr().String())
 	require.NoError(t, err)
-	bridge, err := tsproto.NewH2Bridge(upConn)
+	bridge, err := tsproto.NewH2Bridge(ctx, upConn)
 	require.NoError(t, err)
 
 	streamID := upConn.LocalAddr().String()

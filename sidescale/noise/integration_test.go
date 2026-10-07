@@ -14,7 +14,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/http2"
 	"tailscale.com/types/key"
 
 	"github.com/go-appsec/toolbox/sectool/service/proxy/protocol"
@@ -86,12 +85,10 @@ func serveTS2021(ctx context.Context, ln net.Listener, serverKey key.MachinePriv
 	if _, err := inner.Write(frame); err != nil {
 		return
 	}
-	(&http2.Server{}).ServeConn(inner, &http2.ServeConnOpts{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"path":"` + r.URL.Path + `"}`))
-		}),
-	})
+	_ = tsproto.ServeH2Conn(ctx, inner, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"path":"` + r.URL.Path + `"}`))
+	}))
 }
 
 // TestUpstreamHandshakeAgainstRealServer drives the control handler's upstream half

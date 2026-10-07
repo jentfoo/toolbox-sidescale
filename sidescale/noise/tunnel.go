@@ -131,7 +131,7 @@ func (h *Handler) runTunnel(ctx context.Context, sc *sidecar.StreamConn, init []
 	}
 
 	_ = h.conn.Log("info", "tunnel established", map[string]any{adapter.FieldFlowID: tunnelID, "control_host": controlHost})
-	u.uc.bridge.ServeCapture(innerClient, h.captureInner(ctx, at))
+	u.uc.bridge.ServeCapture(ctx, innerClient, h.captureInner(ctx, at))
 }
 
 // clientEarlyNoise returns the EarlyNoise bytes to forward to the client per the
@@ -201,7 +201,7 @@ func (h *Handler) openUpstream(ctx context.Context, controlHost string, machineK
 		_ = upstream.Close()
 		return nil, fmt.Errorf("upstream handshake: %w", err)
 	}
-	bridge, err := tsproto.NewH2Bridge(bridgeConn)
+	bridge, err := tsproto.NewH2Bridge(ctx, bridgeConn)
 	if err != nil {
 		_ = upstreamInner.Close()
 		_ = upstream.Close()
