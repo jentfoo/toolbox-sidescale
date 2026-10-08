@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"tailscale.com/types/key"
@@ -275,6 +276,77 @@ func TestHealUpstream(t *testing.T) {
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 		require.NoError(t, resp.Body.Close())
 	})
+
+	// teardown while a forward is in flight must leave nothing to heal: the orphaned
+	// tunnel's ref was already returned, so healing it would leak the fresh dial forever
+	t.Run("no_heal_after_teardown", func(t *testing.T) {
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+		var calls int32
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			atomic.AddInt32(&calls, 1)
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+		at := deadTunnel(t, h, ver)
+		up, bridge := at.current() // an in-flight forward's snapshot before teardown
+
+		// the client went away and teardown ran while the forward was still failing
+		_ = bridge.Close()
+		h.closeTunnel(at)
+
+		resp, ferr := h.forwardTunnel(t.Context(), at, mapReq(t.Context()))
+		require.Error(t, ferr)
+		assert.Nil(t, resp)
+
+		cur, _ := at.current()
+		assert.Same(t, up, cur) // no fresh upstream swapped into the orphaned tunnel
+		assert.Equal(t, int32(0), atomic.LoadInt32(&calls))
+		requirePoolDrained(t, h)
+	})
+
+	t.Run("teardown_during_heal_dial", func(t *testing.T) {
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+		var calls int32
+		release := make(chan struct{})
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			atomic.AddInt32(&calls, 1)
+			<-release // hold the heal dial open while teardown races it
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+		at := deadTunnel(t, h, ver)
+		dead, _ := at.current()
+
+		done := make(chan struct{})
+		go func() {
+			_, _ = h.forwardTunnel(t.Context(), at, mapReq(t.Context()))
+			close(done)
+		}()
+		require.Eventually(t, func() bool { return atomic.LoadInt32(&calls) == 1 }, time.Second, time.Millisecond)
+
+		h.closeTunnel(at) // teardown wins the race: returns the tunnel's ref on dead
+		close(release)
+		<-done
+
+		cur, _ := at.current()
+		assert.Same(t, dead, cur) // no swap into a torn-down tunnel
+		requirePoolDrained(t, h)  // the fresh dial is released with the tunnel gone
+	})
+}
+
+// requirePoolDrained asserts every pooled upstream dropped to zero refs and fires each idle
+// close synchronously, so nothing survives teardown past the grace timer.
+func requirePoolDrained(t *testing.T, h *Handler) {
+	t.Helper()
+
+	h.mu.Lock()
+	pooled := bulk.MapValuesSlice(h.upstreams)
+	h.mu.Unlock()
+	for _, u := range pooled {
+		assert.Equal(t, 0, u.refs)
+		h.idleCloseUpstream(u) // fire the grace timer synchronously
+	}
+	h.mu.Lock()
+	assert.Empty(t, h.upstreams)
+	h.mu.Unlock()
 }
 
 func healFailed(at *activeTunnel) bool {

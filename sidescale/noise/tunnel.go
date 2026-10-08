@@ -89,8 +89,9 @@ func (h *Handler) runTunnel(ctx context.Context, sc *sidecar.StreamConn, init []
 		version:      version,
 		session:      h.poolSession(p.StreamID),
 	}
-	// release whichever upstream the tunnel is bound to at close, healed or not
-	defer func() { cur, _ := at.current(); h.releaseUpstream(cur) }()
+	// close releases whichever upstream the tunnel is bound to at teardown, healed or
+	// not; closing also stops a racing forward from healing this orphan onto a fresh dial
+	defer func() { h.closeTunnel(at) }()
 
 	tunnelID, captured, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
 		parentFlowID: p.RequestFlowID,
@@ -239,6 +240,7 @@ type activeTunnel struct {
 	version      uint16
 	session      string // pool discriminator, to re-dial on heal
 	flowID       string
+	closed       bool // teardown returned the tunnel's upstream ref; heals must not swap or re-dial
 	healFailed   bool // guards the wedge signal to one line per dead-upstream episode
 }
 
@@ -261,12 +263,13 @@ func (h *Handler) forwardTunnel(ctx context.Context, at *activeTunnel, req *http
 }
 
 // healUpstream swaps a bound tunnel off the dead upstream (evicted for reason) onto a freshly
-// dialed one, so the next forward recovers. Compare-and-swap on at.up heals concurrent requests once.
+// dialed one, so the next forward recovers. Compare-and-swap on at.up heals concurrent requests
+// once; a closed tunnel never re-dials or takes the swap, since teardown returned its ref.
 func (h *Handler) healUpstream(ctx context.Context, at *activeTunnel, dead *sharedUpstream, reason string) {
 	at.mu.Lock()
-	stale := at.up == dead
+	stale := !at.closed && at.up == dead
 	at.mu.Unlock()
-	if !stale { // a concurrent request already healed
+	if !stale { // a concurrent request already healed, or teardown released the ref
 		return
 	}
 
@@ -285,7 +288,7 @@ func (h *Handler) healUpstream(ctx context.Context, at *activeTunnel, dead *shar
 	}
 
 	at.mu.Lock()
-	if at.up != dead { // lost the race; drop our fresh ref
+	if at.closed || at.up != dead { // torn down mid-dial, or lost the race; drop our fresh ref
 		at.mu.Unlock()
 		h.releaseUpstream(fresh)
 		return
@@ -294,6 +297,20 @@ func (h *Handler) healUpstream(ctx context.Context, at *activeTunnel, dead *shar
 	at.mu.Unlock()
 	h.releaseUpstream(dead) // return the ref the tunnel held on the dead conn
 	_ = h.conn.Log("info", "upstream healed", map[string]any{adapter.FieldFlowID: at.flowID, adapter.FieldStream: fresh.uc.streamID})
+}
+
+// closeTunnel marks the tunnel torn down and releases its bound upstream ref (the one held
+// since dial, healed or not). Idempotent: only the first call releases. Closing stops a
+// racing forward's heal from re-dialing for an orphaned tunnel.
+func (h *Handler) closeTunnel(at *activeTunnel) {
+	at.mu.Lock()
+	first := !at.closed
+	at.closed = true
+	cur := at.up
+	at.mu.Unlock()
+	if first {
+		h.releaseUpstream(cur)
+	}
 }
 
 func (h *Handler) registerTunnel(id string, t *activeTunnel) {
@@ -356,9 +373,9 @@ func (h *Handler) openFreshTunnel(ctx context.Context, controlHost string, machi
 			h.deregisterTunnel(tunnelID)
 			_ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now())
 		}
-		// release the current upstream, which may have healed onto a fresh conn
-		cur, _ := at.current()
-		h.releaseUpstream(cur)
+		// release the current upstream, which may have healed onto a fresh conn; closing
+		// also stops a racing forward from healing this orphan onto a fresh dial
+		h.closeTunnel(at)
 	}
 	return at, cleanup, nil
 }
