@@ -32,7 +32,7 @@ func servingHandler(t *testing.T, cfg *ControlConfig, serverKey key.MachinePriva
 	socket := filepath.Join(t.TempDir(), "sidecar.sock")
 	hostCfg := scsidecar.Config{Socket: socket}
 	mgr := scsidecar.NewManager(hostCfg, &protocol.Registry{}, newRecordingFlows(), noopCore{}, stubRules{})
-	lst, err := scsidecar.NewListener(hostCfg, mgr)
+	lst, err := scsidecar.NewListener(t.Context(), hostCfg, mgr)
 	require.NoError(t, err)
 	go func() { _ = lst.Serve() }()
 	t.Cleanup(func() { _ = lst.Close(context.Background()) })

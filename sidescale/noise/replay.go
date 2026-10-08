@@ -41,6 +41,11 @@ const (
 // p.Force / p.FollowRedirects / p.Destination are ignored for tailscale.control
 // flows because the destination is intrinsic to the tunnel.
 func (h *Handler) OnSidecarSend(p wire.SidecarSendParams) (wire.SidecarSendResult, error) {
+	// the dispatcher installs before Setup (P1-04 startup window): a send arriving then
+	// must not touch half-initialized substitution state (nil keysub panics)
+	if err := h.waitSetup(h.baseCtx); err != nil {
+		return wire.SidecarSendResult{}, err
+	}
 	if p.Flow == nil && p.FlowID == "" {
 		return h.inject(h.baseCtx, p)
 	}
@@ -232,7 +237,7 @@ func (h *Handler) emitProduced(ctx context.Context, req *wire.FlowMessage, resp 
 
 	if req.Path == mapEndpoint && isStreamingMap(req.Path, req.Body) {
 		statusHeaders := responseHeaders(resp)
-		parentID, err := h.conn.PushFlow(ctx, wire.Flow{
+		parentID, _, err := h.conn.PushFlow(ctx, wire.Flow{
 			ProtocolTag:  streamProtocolTag,
 			Direction:    adapter.DirServerToClient,
 			ParentFlowID: parentFlowID,
@@ -257,8 +262,13 @@ func (h *Handler) emitProduced(ctx context.Context, req *wire.FlowMessage, resp 
 				cleanup()
 			}
 		}()
+		// omit an uncaptured stream parent (empty id) from the result
+		var newIDs []string
+		if parentID != "" {
+			newIDs = []string{parentID}
+		}
 		return wire.SidecarSendResult{
-			NewFlowIDs: []string{parentID},
+			NewFlowIDs: newIDs,
 			Response:   &wire.FlowMessage{StatusCode: resp.StatusCode, Headers: statusHeaders},
 		}, nil
 	}
@@ -272,7 +282,7 @@ func (h *Handler) emitProduced(ctx context.Context, req *wire.FlowMessage, resp 
 		return wire.SidecarSendResult{}, err
 	}
 	respMsg := &wire.FlowMessage{StatusCode: resp.StatusCode, Headers: responseHeaders(resp), Body: body}
-	id, err := h.conn.PushFlow(ctx, wire.Flow{
+	id, _, err := h.conn.PushFlow(ctx, wire.Flow{
 		ProtocolTag:  controlProtocolTag,
 		Direction:    adapter.DirClientToServer,
 		ParentFlowID: parentFlowID,
@@ -284,6 +294,9 @@ func (h *Handler) emitProduced(ctx context.Context, req *wire.FlowMessage, resp 
 	})
 	if err != nil {
 		return wire.SidecarSendResult{}, err
+	}
+	if id == "" { // uncaptured produced flow: report no new ids
+		return wire.SidecarSendResult{Response: respMsg}, nil
 	}
 	return wire.SidecarSendResult{NewFlowIDs: []string{id}, Response: respMsg}, nil
 }

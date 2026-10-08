@@ -41,7 +41,7 @@ func (h *Handler) captureFrame(ctx context.Context, tunnelID string, frame []byt
 	// rules apply only to a frame's logical text body (HEALTH); opaque packets and derived
 	// X-Derp-* headers aren't a hot-path mutation surface (mutate those via replay)
 	if f.bodyRaw != nil || len(f.body) == 0 {
-		if _, err := h.conn.PushFlow(ctx, captured); err != nil {
+		if _, _, err := h.conn.PushFlow(ctx, captured); err != nil {
 			return nil, err
 		}
 		return frame, nil
@@ -52,7 +52,7 @@ func (h *Handler) captureFrame(ctx context.Context, tunnelID string, frame []byt
 	}
 	mutBody, fired := h.conn.Rules().ApplyBody(f.body, bodyType)
 	if len(fired) == 0 {
-		if _, err := h.conn.PushFlow(ctx, captured); err != nil {
+		if _, _, err := h.conn.PushFlow(ctx, captured); err != nil {
 			return nil, err
 		}
 		return frame, nil
@@ -62,7 +62,7 @@ func (h *Handler) captureFrame(ctx context.Context, tunnelID string, frame []byt
 	mf.body = mutBody
 	mutated := captured
 	setMessage(&mutated, dir, frameMessage(t, mf))
-	if _, err := h.conn.PushFlow(ctx, mutated); err != nil {
+	if _, _, err := h.conn.PushFlow(ctx, mutated); err != nil {
 		return nil, err
 	}
 	return derpproto.EncodeFrame(t, encodePayload(mf)), nil
@@ -96,7 +96,7 @@ func (h *Handler) captureHandshakeFrame(ctx context.Context, tunnelID string, t 
 	}
 	flow.CompletedAt = flow.StartedAt
 	setMessage(&flow, dir, &wire.FlowMessage{Method: derpproto.FrameName(t), Path: framePath(t), Headers: headers, Body: infoJSON})
-	_, err := h.conn.PushFlow(ctx, flow)
+	_, _, err := h.conn.PushFlow(ctx, flow)
 	return err
 }
 

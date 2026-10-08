@@ -27,8 +27,7 @@ import (
 type keySubstituter struct {
 	h           *Handler
 	controlHost string
-	clientPort  int
-	responderID string
+	responderID string // the /key responder's stable label, set once registered
 
 	mu        sync.Mutex
 	fetched   bool
@@ -44,7 +43,7 @@ func setupKeySubstitution(ctx context.Context, h *Handler) (*keySubstituter, err
 	if h.cfg.KeyStrategy != KeyStrategySubstitute {
 		return nil, nil
 	}
-	ks := &keySubstituter{h: h, controlHost: h.controlHost, clientPort: h.controlPort}
+	ks := &keySubstituter{h: h, controlHost: h.controlHost}
 	// learn the real key before registering any responder to avoid a self-loop
 	if err := ks.ensureFetched(ctx); err != nil {
 		return nil, err
@@ -54,54 +53,55 @@ func setupKeySubstitution(ctx context.Context, h *Handler) (*keySubstituter, err
 		if err != nil {
 			return nil, err
 		}
-		id, err := ks.registerResponder(ctx, body)
-		if err != nil {
+		if err := ks.registerResponder(ctx, body); err != nil {
 			return nil, fmt.Errorf("register /key responder: %w", err)
 		}
-		ks.responderID = id
 	}
 	return ks, nil
 }
 
+// responderLabel is the stable proxy_respond label for the /key entry. Responders
+// persist in sectool across restarts and get a fresh random id per add, so the label
+// is the handle: replace-on-add drops a stale entry from an unclean exit, and cleanup
+// deletes by the same name on every run.
+func (ks *keySubstituter) responderLabel() string {
+	return "sidescale-keysub-" + ks.controlHost
+}
+
 // registerResponder registers the substituted /key response via the core
-// proxy_respond_add tool and returns the responder id.
-func (ks *keySubstituter) registerResponder(ctx context.Context, body []byte) (string, error) {
+// proxy_respond_add tool, replacing any stale entry under the stable label.
+func (ks *keySubstituter) registerResponder(ctx context.Context, body []byte) error {
 	// enable core tools so proxy_respond_add is permitted without the operator
 	// starting sectool with --workflow none (best-effort: tool absent under an
 	// explicit workflow, where tools already work)
 	if _, err := ks.h.conn.CoreInvoke(ctx, "workflow", map[string]any{"task": "cli"}); err != nil {
 		_ = ks.h.conn.Log("debug", "keysub: workflow init skipped", map[string]any{"err": err.Error()})
 	}
-	// omit the default https port so the canonical origin matches the client's
-	// request (proxy_respond_add resolves a missing port to 443)
-	origin := "https://" + ks.controlHost
-	if ks.clientPort != 443 {
-		origin += ":" + strconv.Itoa(ks.clientPort)
-	}
+	label := ks.responderLabel()
+	// replace-on-add: a leftover responder from an unclean exit would keep serving the
+	// old substituted key; drop it first (best-effort, not-found is the clean slate)
+	_, _ = ks.h.conn.CoreInvoke(ctx, "proxy_respond_delete", map[string]any{"id": label})
+	// the host param is scheme- and port-agnostic, matching any port on controlHost
 	res, err := ks.h.conn.CoreInvoke(ctx, "proxy_respond_add", map[string]any{
-		"origin":            origin,
+		"host":              ks.controlHost,
 		adapter.FieldPath:   "/key",
 		adapter.FieldMethod: http.MethodGet,
 		"status_code":       http.StatusOK,
 		"headers":           map[string]string{"Content-Type": "application/json"},
 		"body":              string(body),
+		"label":             label,
 	})
 	if err != nil {
-		return "", err
+		return err
 	}
 	if res.IsError {
-		return "", errors.New(res.Content)
+		return errors.New(res.Content)
 	}
-	var entry struct {
-		ResponderID string `json:"responder_id"`
-	}
-	if err := json.Unmarshal([]byte(res.Content), &entry); err != nil {
-		return "", fmt.Errorf("parse responder: %w", err)
-	}
-	return entry.ResponderID, nil
+	ks.responderID = label
+	return nil
 }
 
-// close deletes a responder registered by this substituter.
+// close deletes the /key responder (by its stable label) while the conn is still live.
 func (ks *keySubstituter) close(ctx context.Context) {
 	if ks == nil || ks.responderID == "" {
 		return

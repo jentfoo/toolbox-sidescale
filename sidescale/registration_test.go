@@ -23,17 +23,17 @@ import (
 
 const testInstanceID = "00000000-0000-4000-8000-000000000001"
 
-// startHost brings up a standalone sidecar host on a temp socket with no-op backends
-func startHost(t *testing.T) (*scsidecar.Manager, string) {
+// startHost brings up a standalone sidecar host on socket with no-op backends. The
+// listener is returned so a test can drop the host mid-run (t.Cleanup closes it).
+func startHost(t *testing.T, socket string) (*scsidecar.Listener, *scsidecar.Manager, string) {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "sidecar.sock")
 	cfg := scsidecar.Config{Socket: socket}
 	mgr := scsidecar.NewManager(cfg, &protocol.Registry{}, noopFlowSink{}, noopCore{}, noopRules{})
-	lst, err := scsidecar.NewListener(cfg, mgr)
+	lst, err := scsidecar.NewListener(t.Context(), cfg, mgr)
 	require.NoError(t, err)
 	go func() { _ = lst.Serve() }()
 	t.Cleanup(func() { _ = lst.Close(context.Background()) })
-	return mgr, socket
+	return lst, mgr, socket
 }
 
 func TestRegistration(t *testing.T) {
@@ -42,7 +42,7 @@ func TestRegistration(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("accepts_declared_capabilities", func(t *testing.T) {
-		mgr, socket := startHost(t)
+		_, mgr, socket := startHost(t, filepath.Join(t.TempDir(), "sidecar.sock"))
 		conn, err := sidecar.Dial(t.Context(), socket, buildRegistration(cfg, testInstanceID))
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = conn.Close() })
@@ -57,7 +57,7 @@ func TestRegistration(t *testing.T) {
 	})
 
 	t.Run("rejects_major_version_mismatch", func(t *testing.T) {
-		_, socket := startHost(t)
+		_, _, socket := startHost(t, filepath.Join(t.TempDir(), "sidecar.sock"))
 		reg := buildRegistration(cfg, testInstanceID)
 		reg.ProtocolVersion = wire.ProtocolVersion{Major: wire.VersionMajor + 1}
 		_, err := sidecar.Dial(t.Context(), socket, reg)
@@ -65,7 +65,7 @@ func TestRegistration(t *testing.T) {
 	})
 
 	t.Run("clean_close", func(t *testing.T) {
-		mgr, socket := startHost(t)
+		_, mgr, socket := startHost(t, filepath.Join(t.TempDir(), "sidecar.sock"))
 		conn, err := sidecar.Dial(t.Context(), socket, buildRegistration(cfg, testInstanceID))
 		require.NoError(t, err)
 		require.NoError(t, conn.Close())
@@ -170,6 +170,42 @@ func TestBuildRegistration(t *testing.T) {
 		assert.Equal(t, wire.PortRange{Low: 443, High: 443}, reg.Capabilities.EarlyClaims[0].PortRange)
 		assert.Equal(t, "derp2.example.com", reg.Capabilities.EarlyClaims[1].HostMatch)
 		assert.Equal(t, wire.PortRange{Low: 3340, High: 3340}, reg.Capabilities.EarlyClaims[1].PortRange)
+	})
+
+	// toolbox ffa8492 compiles plain-dot claim patterns as literals, so config hosts
+	// must pass through verbatim: no local escaping, no wildcard handling
+	t.Run("host_patterns_verbatim", func(t *testing.T) {
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		cfg.Control.ControlHosts = []string{"Ctrl.Example.COM:8443"}
+		cfg.Control.KeySubstitution = noise.KeySubSidecarTLS
+		cfg.Derp = &derp.DerpConfig{
+			DerpHosts: []string{"DERP1.Example.COM:3340", "DERP2.Example.COM"},
+			RelayMode: derp.RelayModeRelay,
+		}
+		cfg.Derp.ApplyDefaults()
+		reg := buildRegistration(cfg, testInstanceID)
+
+		// hosts lowercase via addr.Parse, ports stripped, metacharacters untouched
+		require.Len(t, reg.Capabilities.UpgradeClaims, 3)
+		assert.Equal(t, "ctrl.example.com", reg.Capabilities.UpgradeClaims[0].HostPattern)
+		assert.Equal(t, "derp1.example.com", reg.Capabilities.UpgradeClaims[1].HostPattern)
+		assert.Equal(t, "derp2.example.com", reg.Capabilities.UpgradeClaims[2].HostPattern)
+		for _, c := range reg.Capabilities.UpgradeClaims {
+			assert.NotContains(t, c.HostPattern, `\\`)
+			assert.NotContains(t, c.PathPattern, `\\`)
+		}
+
+		require.Len(t, reg.Capabilities.EarlyClaims, 1) // sidecar_tls control claim
+		assert.Equal(t, "ctrl.example.com", reg.Capabilities.EarlyClaims[0].HostMatch)
+		require.NotNil(t, reg.Capabilities.EarlyClaims[0].TLS)
+		assert.Equal(t, "ctrl.example.com", reg.Capabilities.EarlyClaims[0].TLS.SNIMatch)
+
+		// the literal-shaped claims must compile host-side, i.e. register cleanly
+		_, _, socket := startHost(t, filepath.Join(t.TempDir(), "sidecar.sock"))
+		conn, err := sidecar.Dial(t.Context(), socket, reg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
 	})
 }
 

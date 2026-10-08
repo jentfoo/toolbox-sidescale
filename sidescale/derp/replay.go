@@ -129,7 +129,7 @@ func (h *Handler) openFreshUpstream(ctx context.Context, host string) (*sendTarg
 	if err != nil {
 		return nil, err
 	}
-	tunnelID, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
+	tunnelID, captured, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
 		tunnelKey:    up.streamID,
 		upstreamAddr: up.addr,
 		clientInfo:   ci,
@@ -144,7 +144,9 @@ func (h *Handler) openFreshUpstream(ctx context.Context, host string) (*sendTarg
 	}
 	cleanup := func() {
 		up.close()
-		_ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now())
+		if captured { // "": uncaptured envelope, nothing to complete
+			_ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now())
+		}
 	}
 	return &sendTarget{
 		flowID:      tunnelID,
@@ -248,9 +250,12 @@ func (h *Handler) emitProduced(ctx context.Context, tgt *sendTarget, m *wire.Flo
 	}
 	flow.CompletedAt = flow.StartedAt
 	setMessage(&flow, tgt.dir, m)
-	id, err := h.conn.PushFlow(ctx, flow)
+	id, _, err := h.conn.PushFlow(ctx, flow)
 	if err != nil {
 		return wire.SidecarSendResult{}, err
+	}
+	if id == "" { // uncaptured produced frame: report no new ids
+		return wire.SidecarSendResult{}, nil
 	}
 	return wire.SidecarSendResult{NewFlowIDs: []string{id}}, nil
 }

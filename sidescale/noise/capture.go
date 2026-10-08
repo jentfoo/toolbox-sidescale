@@ -63,8 +63,9 @@ func (h *Handler) captureInner(ctx context.Context, at *activeTunnel) tsproto.Ca
 				regular = mutRegular
 				setResponseHeaders(resp, mutRegular)
 			}
-			// parent stays in-flight (no CompletedAt) as the anchor, completed on stream close
-			parentID, err := h.conn.PushFlow(ctx, wire.Flow{
+			// parent stays in-flight (no CompletedAt) as the anchor, completed on stream close;
+			// an uncaptured parent (empty id) leaves the chunks standalone
+			parentID, _, err := h.conn.PushFlow(ctx, wire.Flow{
 				ProtocolTag:  streamProtocolTag,
 				Direction:    adapter.DirServerToClient,
 				ParentFlowID: at.flowID,
@@ -111,24 +112,24 @@ func (h *Handler) captureRequest(ctx context.Context, tunnelID string, req *http
 
 	// a request capture is a complete one-way flow (the response is its own
 	// server_to_client flow), so mark it done rather than leaving it in-flight
-	captured := wire.Flow{
+	reqFlow := wire.Flow{
 		ProtocolTag:  controlProtocolTag,
 		Direction:    adapter.DirClientToServer,
 		ParentFlowID: tunnelID,
 		Request:      &wire.FlowMessage{Method: req.Method, Path: req.URL.Path, Headers: headers, Body: body},
 		StartedAt:    time.Now(),
 	}
-	captured.CompletedAt = captured.StartedAt
+	reqFlow.CompletedAt = reqFlow.StartedAt
 	if len(fired) == 0 {
-		if _, err := h.conn.PushFlow(ctx, captured); err != nil {
+		if _, _, err := h.conn.PushFlow(ctx, reqFlow); err != nil {
 			return nil, nil, err
 		}
 		return body, headers, nil
 	}
 
-	mutated := captured
+	mutated := reqFlow
 	mutated.Request = &wire.FlowMessage{Method: req.Method, Path: req.URL.Path, Headers: mutHeaders, Body: mutBody}
-	if _, err := h.conn.PushFlow(ctx, mutated); err != nil {
+	if _, _, err := h.conn.PushFlow(ctx, mutated); err != nil {
 		return nil, nil, err
 	}
 	return mutBody, mutHeaders, nil
@@ -150,23 +151,23 @@ func (h *Handler) captureResponse(ctx context.Context, tunnelID string, resp *ht
 	mutHeaders := slices.Concat(mutRegular, pseudo)
 	fired := slices.Concat(firedBody, firedHdr)
 
-	captured := wire.Flow{
+	respFlow := wire.Flow{
 		ProtocolTag:  controlProtocolTag,
 		Direction:    adapter.DirServerToClient,
 		ParentFlowID: tunnelID,
 		Response:     &wire.FlowMessage{StatusCode: resp.StatusCode, Headers: headers, Body: body},
 		StartedAt:    time.Now(),
 	}
-	captured.CompletedAt = captured.StartedAt
+	respFlow.CompletedAt = respFlow.StartedAt
 	outBody, outHeaders := body, headers
 	if len(fired) == 0 {
-		if _, err := h.conn.PushFlow(ctx, captured); err != nil {
+		if _, _, err := h.conn.PushFlow(ctx, respFlow); err != nil {
 			return nil, err
 		}
 	} else {
-		mutated := captured
+		mutated := respFlow
 		mutated.Response = &wire.FlowMessage{StatusCode: resp.StatusCode, Headers: mutHeaders, Body: mutBody}
-		if _, err := h.conn.PushFlow(ctx, mutated); err != nil {
+		if _, _, err := h.conn.PushFlow(ctx, mutated); err != nil {
 			return nil, err
 		}
 		outBody, outHeaders = mutBody, mutHeaders

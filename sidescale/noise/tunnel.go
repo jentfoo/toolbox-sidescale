@@ -92,7 +92,7 @@ func (h *Handler) runTunnel(ctx context.Context, sc *sidecar.StreamConn, init []
 	// release whichever upstream the tunnel is bound to at close, healed or not
 	defer func() { cur, _ := at.current(); h.releaseUpstream(cur) }()
 
-	tunnelID, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
+	tunnelID, captured, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
 		parentFlowID: p.RequestFlowID,
 		tunnelKey:    p.StreamID,
 		clientAddr:   p.PeerAddr,
@@ -108,13 +108,17 @@ func (h *Handler) runTunnel(ctx context.Context, sc *sidecar.StreamConn, init []
 		h.tunnelError(p.StreamID, "tunnel envelope", err)
 		return
 	}
-	// complete the envelope on every subsequent exit so it is never left in-flight;
-	// teardown rides the stream's connection context, which outlives any request scope
-	defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
+	// an uncaptured envelope (operator filter) has no id: skip the registry and the
+	// teardown so "" never keys tunnel state or stores a junk flow
+	if captured {
+		// complete the envelope on every subsequent exit so it is never left in-flight;
+		// teardown rides the stream's connection context, which outlives any request scope
+		defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
 
-	at.flowID = tunnelID
-	h.registerTunnel(tunnelID, at)
-	defer h.deregisterTunnel(tunnelID)
+		at.flowID = tunnelID
+		h.registerTunnel(tunnelID, at)
+		defer h.deregisterTunnel(tunnelID)
+	}
 
 	// forward the server EarlyNoise to the client before HTTP/2, per the configured
 	// mode (forward verbatim / suppress / replace with a synthesized challenge)
@@ -313,14 +317,14 @@ func (h *Handler) getTunnel(id string) *activeTunnel {
 
 // openFreshTunnel opens a new upstream Noise tunnel with no client-facing side, at the
 // given capability version, for the replay fresh-tunnel fallback and injection into a
-// fresh tunnel. It registers the activeTunnel and returns a cleanup that deregisters it,
-// two-phase completes the envelope, and tears down the upstream.
+// fresh tunnel. It registers the activeTunnel (captured envelopes only) and returns a
+// cleanup that deregisters it, two-phase completes the envelope, and tears down the upstream.
 func (h *Handler) openFreshTunnel(ctx context.Context, controlHost string, machineKey key.MachinePrivate, version uint16, session string) (*activeTunnel, func(), error) {
 	u, err := h.getOrCreateUpstream(ctx, controlHost, machineKey, version, session)
 	if err != nil {
 		return nil, nil, err
 	}
-	tunnelID, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
+	tunnelID, captured, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
 		tunnelKey:    u.uc.streamID,
 		upstreamAddr: u.uc.addr,
 		version:      version,
@@ -344,11 +348,14 @@ func (h *Handler) openFreshTunnel(ctx context.Context, controlHost string, machi
 		session:      session,
 		flowID:       tunnelID,
 	}
-	h.registerTunnel(tunnelID, at)
+	if captured {
+		h.registerTunnel(tunnelID, at)
+	}
 	cleanup := func() {
-		h.deregisterTunnel(tunnelID)
-		// teardown rides the connection context rooted by the caller
-		_ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now())
+		if captured {
+			h.deregisterTunnel(tunnelID)
+			_ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now())
+		}
 		// release the current upstream, which may have healed onto a fresh conn
 		cur, _ := at.current()
 		h.releaseUpstream(cur)
@@ -452,8 +459,10 @@ type envelopeInfo struct {
 }
 
 // emitTunnelEnvelope pushes the tunnel-envelope flow and returns its flow_id, used as parent_flow_id for
-// every inner flow. Client-facing headers are added only when a client-facing side exists.
-func (h *Handler) emitTunnelEnvelope(ctx context.Context, in envelopeInfo) (string, error) {
+// every inner flow, and whether it was captured. An uncaptured envelope (operator filter) has an empty
+// id, so the caller must not register or complete it. Client-facing headers are added only when a
+// client-facing side exists.
+func (h *Handler) emitTunnelEnvelope(ctx context.Context, in envelopeInfo) (string, bool, error) {
 	serverHash := in.upstream.HandshakeHash()
 	headers := []wire.Header{
 		{Name: "X-TS-Noise-Protocol", Value: noiseProtocolName},

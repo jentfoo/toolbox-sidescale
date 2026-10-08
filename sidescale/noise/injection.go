@@ -53,6 +53,11 @@ func (h *Handler) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeToolResult, 
 	if p.Name != InjectToolName {
 		return wire.InvokeToolResult{}, fmt.Errorf("invoke_tool: unknown tool %q", p.Name)
 	}
+	// the dispatcher installs before Setup (P1-04 startup window): hold the tool until
+	// substitution state is complete rather than serving with a nil keysub
+	if err := h.waitSetup(h.baseCtx); err != nil {
+		return wire.InvokeToolResult{IsError: true, Result: toolErr(err)}, nil
+	}
 	ir, err := parseInjection(p.Arguments)
 	if err != nil {
 		return wire.InvokeToolResult{IsError: true, Result: toolErr(err)}, nil

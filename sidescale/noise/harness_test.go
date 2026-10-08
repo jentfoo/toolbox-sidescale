@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -71,6 +72,14 @@ func (f *recordingFlows) wasCompleted(id string) bool {
 	return f.completed[id]
 }
 
+// completedSnapshot clones the completed-flow set for assertions.
+func (f *recordingFlows) completedSnapshot() map[string]bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return maps.Clone(f.completed)
+}
+
 func (f *recordingFlows) SetInvokedBy(string, string) bool { return true }
 
 func (f *recordingFlows) Get(id string) (*types.Flow, bool) {
@@ -90,6 +99,12 @@ func (f *recordingFlows) list() []*types.Flow {
 	return slices.Clone(f.flows)
 }
 
+// captureNone excludes every flow, standing in for an operator capture filter that
+// drops the tailscale.* tags. Recording delegates otherwise work normally.
+type captureNone struct{ *recordingFlows }
+
+func (captureNone) ShouldCapture(*types.Flow) bool { return false }
+
 // stubRules is a RuleSource returning a fixed rule snapshot.
 type stubRules struct{ rules []wire.Rule }
 
@@ -105,7 +120,7 @@ func testHandler(t *testing.T, cfg *ControlConfig, flows scsidecar.FlowSink, cor
 	socket := filepath.Join(t.TempDir(), "sidecar.sock")
 	hostCfg.Socket = socket
 	mgr := scsidecar.NewManager(hostCfg, &protocol.Registry{}, flows, core, rules)
-	lst, err := scsidecar.NewListener(hostCfg, mgr)
+	lst, err := scsidecar.NewListener(t.Context(), hostCfg, mgr)
 	require.NoError(t, err)
 	go func() { _ = lst.Serve() }()
 	t.Cleanup(func() { _ = lst.Close(context.Background()) })
@@ -116,7 +131,9 @@ func testHandler(t *testing.T, cfg *ControlConfig, flows scsidecar.FlowSink, cor
 	t.Cleanup(func() { _ = conn.Close() })
 
 	router := sidecar.NewStreamRouter(conn)
-	return NewHandler(t.Context(), conn, router, cfg, "sidescale.test", key.NewMachine(), func(string) (key.MachinePrivate, error) { return key.NewMachine(), nil })
+	h := NewHandler(t.Context(), conn, router, cfg, "sidescale.test", key.NewMachine(), func(string) (key.MachinePrivate, error) { return key.NewMachine(), nil })
+	close(h.setupDone) // harness handlers are post-setup; Setup is exercised separately
+	return h
 }
 
 func defaultControlConfig() (ControlConfig, error) {
@@ -133,10 +150,12 @@ func (noopCore) CoreInvoke(context.Context, string, json.RawMessage) (string, bo
 }
 func (noopCore) CoreToolNames() []string { return nil }
 
-// fakeCore is a CoreService that answers proxy_respond_add/delete and records the params each tool was invoked with.
+// fakeCore is a CoreService that answers proxy_respond_add/delete and records the
+// params and call order of each tool invocation.
 type fakeCore struct {
 	mu      sync.Mutex
 	invoked map[string]json.RawMessage
+	order   []string
 }
 
 func newFakeCore() *fakeCore { return &fakeCore{invoked: map[string]json.RawMessage{}} }
@@ -144,6 +163,7 @@ func newFakeCore() *fakeCore { return &fakeCore{invoked: map[string]json.RawMess
 func (c *fakeCore) CoreInvoke(_ context.Context, tool string, params json.RawMessage) (string, bool, error) {
 	c.mu.Lock()
 	c.invoked[tool] = params
+	c.order = append(c.order, tool)
 	c.mu.Unlock()
 	switch tool {
 	case "proxy_respond_add":
@@ -162,6 +182,14 @@ func (c *fakeCore) params(tool string) json.RawMessage {
 	defer c.mu.Unlock()
 
 	return c.invoked[tool]
+}
+
+// calls returns the ordered tool names CoreInvoke saw.
+func (c *fakeCore) calls() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return slices.Clone(c.order)
 }
 
 // fakeKeyResponse returns a NativeHTTPSend hook that answers /key with the given server public key.

@@ -354,6 +354,27 @@ func TestReplay(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "foo=bar", <-gotQuery)
 	})
+
+	t.Run("capture_filtered_reports_no_ids", func(t *testing.T) {
+		flows := captureNone{newRecordingFlows()}
+		h := testHandler(t, &cfg, flows, noopCore{}, stubRules{}, scsidecar.Config{})
+		fakeTunnel(t, h, "tunnelX", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, mapEndpoint, r.URL.Path)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"MachineAuthorized":true}`))
+		}))
+
+		src := &wire.Flow{
+			ProtocolTag:  controlProtocolTag,
+			ParentFlowID: "tunnelX",
+			Request:      &wire.FlowMessage{Method: http.MethodPost, Path: mapEndpoint, Headers: []wire.Header{{Name: ":method", Value: "POST"}, {Name: ":path", Value: mapEndpoint}}, Body: []byte(`{}`)},
+		}
+		res, err := h.replay(t.Context(), wire.SidecarSendParams{Flow: src})
+		require.NoError(t, err)
+		require.NotNil(t, res.Response) // the send itself still rides the tunnel
+		assert.Empty(t, res.NewFlowIDs) // the produced flow was filtered: no id to report
+		assert.Empty(t, flows.list())
+	})
 }
 
 func TestSelectTunnel(t *testing.T) {

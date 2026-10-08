@@ -124,7 +124,7 @@ func (h *Handler) runTunnel(ctx context.Context, client *sidecar.StreamConn) {
 	}
 	defer up.close()
 
-	tunnelID, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
+	tunnelID, captured, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
 		parentFlowID: p.RequestFlowID,
 		tunnelKey:    p.StreamID,
 		clientAddr:   p.PeerAddr,
@@ -140,22 +140,26 @@ func (h *Handler) runTunnel(ctx context.Context, client *sidecar.StreamConn) {
 		h.tunnelError(p.StreamID, "tunnel envelope", err)
 		return
 	}
-	defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
+	// an uncaptured envelope (operator filter) has no id: skip the registry and the
+	// teardown so "" never keys tunnel state or stores a junk flow
+	if captured {
+		defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
 
-	h.registerTunnel(tunnelID, &activeTunnel{
-		flowID:      tunnelID,
-		clientKey:   clientPub,
-		client:      client,
-		clientFr:    clientFr,
-		upstream:    up.stream,
-		upstreamF:   up.fr,
-		upstreamID:  up.streamID,
-		nodeKey:     nodeKey,
-		upstreamPub: up.serverPub,
-		mesh:        !clientInfo.MeshKey.IsZero(),
-		host:        host,
-	})
-	defer h.deregisterTunnel(tunnelID)
+		h.registerTunnel(tunnelID, &activeTunnel{
+			flowID:      tunnelID,
+			clientKey:   clientPub,
+			client:      client,
+			clientFr:    clientFr,
+			upstream:    up.stream,
+			upstreamF:   up.fr,
+			upstreamID:  up.streamID,
+			nodeKey:     nodeKey,
+			upstreamPub: up.serverPub,
+			mesh:        !clientInfo.MeshKey.IsZero(),
+			host:        host,
+		})
+		defer h.deregisterTunnel(tunnelID)
+	}
 
 	// seal the upstream ServerInfo to the client to complete its login
 	siPayload, err := derpproto.ServerInfoPayload(h.serverKey, clientPub, up.serverInfo)
@@ -381,8 +385,9 @@ type envelopeInfo struct {
 }
 
 // emitTunnelEnvelope pushes the tunnel-envelope flow and returns its flow_id, used as
-// parent_flow_id for every frame flow.
-func (h *Handler) emitTunnelEnvelope(ctx context.Context, in envelopeInfo) (string, error) {
+// parent_flow_id for every frame flow, and whether it was captured. An uncaptured
+// envelope (operator filter) has an empty id, so the caller must not register or complete it.
+func (h *Handler) emitTunnelEnvelope(ctx context.Context, in envelopeInfo) (string, bool, error) {
 	meshFlag := strconv.FormatBool(!in.clientInfo.MeshKey.IsZero())
 	headers := []wire.Header{
 		{Name: "X-Derp-Protocol-Version", Value: strconv.Itoa(derpproto.ProtocolVersion)},

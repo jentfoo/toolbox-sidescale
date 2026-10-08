@@ -101,16 +101,16 @@ func (r *mapStreamReader) processFrame(frame []byte) ([]byte, error) {
 	}
 
 	mutJSON, fired := r.h.conn.Rules().ApplyBody(payload, wire.RuleTypeResponseBody)
-	captured := wire.Flow{
+	frameFlow := wire.Flow{
 		ProtocolTag:  streamProtocolTag,
 		Direction:    adapter.DirServerToClient,
 		ParentFlowID: r.parentID,
 		Response:     &wire.FlowMessage{StatusCode: http.StatusOK, Headers: compressedHeaders(frame[mapFramePrefixLen:]), Body: payload},
 		StartedAt:    time.Now(),
 	}
-	captured.CompletedAt = captured.StartedAt
+	frameFlow.CompletedAt = frameFlow.StartedAt
 	if len(fired) == 0 {
-		if _, err := r.h.conn.PushFlow(r.ctx, captured); err != nil {
+		if _, _, err := r.h.conn.PushFlow(r.ctx, frameFlow); err != nil {
 			return nil, err
 		}
 		return frame, nil // forward original bytes verbatim
@@ -119,16 +119,16 @@ func (r *mapStreamReader) processFrame(frame []byte) ([]byte, error) {
 	// re-encode with the source frame's compression mode: a client that requested an
 	// uncompressed stream (Compress:"") would fail to decode a zstd re-encode
 	outFrame := tsproto.EncodeMapResponseFrame(mutJSON, compressed)
-	mutated := captured
+	mutated := frameFlow
 	mutated.Response = &wire.FlowMessage{StatusCode: http.StatusOK, Headers: compressedHeaders(outFrame[mapFramePrefixLen:]), Body: mutJSON}
-	if _, err := r.h.conn.PushFlow(r.ctx, mutated); err != nil {
+	if _, _, err := r.h.conn.PushFlow(r.ctx, mutated); err != nil {
 		return nil, err
 	}
 	return outFrame, nil
 }
 
 func (r *mapStreamReader) finish() {
-	if r.finished {
+	if r.finished || r.parentID == "" { // "": uncaptured parent, nothing to complete
 		return
 	}
 	r.finished = true

@@ -16,6 +16,52 @@ import (
 	"github.com/jentfoo/toolbox-sidescale/sidescale/tsproto"
 )
 
+func TestOpenFreshTunnel(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := defaultControlConfig()
+	require.NoError(t, err)
+	cfg.KeyStrategy = KeyStrategyBorrow // no keysub, safe outside Setup
+	ver := uint16(tsproto.CurrentCapabilityVersion)
+
+	t.Run("uncaptured_envelope_skips_registry", func(t *testing.T) {
+		flows := captureNone{newRecordingFlows()}
+		h := testHandler(t, &cfg, flows, noopCore{}, stubRules{}, scsidecar.Config{})
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+
+		at, cleanup, err := h.openFreshTunnel(t.Context(), "ctrl.example", key.NewMachine(), ver, h.dedicatedPoolSession())
+		require.NoError(t, err)
+		assert.Empty(t, at.flowID) // filter excluded the envelope: no id exists
+
+		h.mu.Lock()
+		assert.Empty(t, h.tunnels) // no ""-keyed registry entry to cross-contaminate
+		h.mu.Unlock()
+
+		cleanup()
+		stored, completed := flows.list(), flows.completedSnapshot()
+		assert.Empty(t, stored) // no junk flow stored under the empty id
+		assert.Empty(t, completed)
+	})
+
+	t.Run("captured_envelope_registers", func(t *testing.T) {
+		flows := newRecordingFlows()
+		h := testHandler(t, &cfg, flows, noopCore{}, stubRules{}, scsidecar.Config{})
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+
+		at, cleanup, err := h.openFreshTunnel(t.Context(), "ctrl.example", key.NewMachine(), ver, h.dedicatedPoolSession())
+		require.NoError(t, err)
+		require.NotEmpty(t, at.flowID)
+		assert.Same(t, at, h.getTunnel(at.flowID))
+
+		cleanup()
+		assert.Nil(t, h.getTunnel(at.flowID))
+	})
+}
+
 func TestUpstreamDial(t *testing.T) {
 	t.Parallel()
 

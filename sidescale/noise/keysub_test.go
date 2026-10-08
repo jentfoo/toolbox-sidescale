@@ -32,22 +32,36 @@ func TestSetupKeySubstitution(t *testing.T) {
 		ks, err := setupKeySubstitution(t.Context(), h)
 		require.NoError(t, err)
 		require.NotNil(t, ks)
-		assert.Equal(t, "resp1", ks.responderID)
+		label := "sidescale-keysub-" + defaultControlHost
+		assert.Equal(t, label, ks.responderID)
 
 		got, err := ks.realServerKey(t.Context())
 		require.NoError(t, err)
 		assert.Equal(t, realKey, got)
 
 		var args struct {
-			Origin string `json:"origin"`
-			Path   string `json:"path"`
-			Body   string `json:"body"`
+			Host  string `json:"host"`
+			Path  string `json:"path"`
+			Label string `json:"label"`
+			Body  string `json:"body"`
 		}
 		require.NoError(t, json.Unmarshal(core.params("proxy_respond_add"), &args))
-		assert.Equal(t, "https://"+defaultControlHost, args.Origin)
+		// host passes through verbatim (responders match by host, port/scheme-agnostic)
+		assert.Equal(t, defaultControlHost, args.Host)
 		assert.Equal(t, "/key", args.Path)
+		assert.Equal(t, label, args.Label)
 		assert.Contains(t, args.Body, h.responderKey.Public().String())
 		assert.NotContains(t, args.Body, realKey.String())
+
+		// replace-on-add: the stale entry is dropped under the same label first
+		var del struct {
+			ID string `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(core.params("proxy_respond_delete"), &del))
+		assert.Equal(t, label, del.ID)
+		calls := core.calls() // workflow init precedes the responder pair
+		require.Len(t, calls, 3)
+		assert.Equal(t, []string{"proxy_respond_delete", "proxy_respond_add"}, calls[1:])
 	})
 
 	t.Run("borrow_needs_no_substitution", func(t *testing.T) {
@@ -59,6 +73,44 @@ func TestSetupKeySubstitution(t *testing.T) {
 		ks, err := setupKeySubstitution(t.Context(), h)
 		require.NoError(t, err)
 		assert.Nil(t, ks)
+	})
+
+	t.Run("close_deletes_by_stable_label", func(t *testing.T) {
+		cfg, err := defaultControlConfig()
+		require.NoError(t, err)
+
+		realKey := key.NewMachine().Public()
+		core := newFakeCore()
+		hostCfg := sidecar.Config{NativeHTTPSend: fakeKeyResponse(realKey)}
+		h := testHandler(t, &cfg, newRecordingFlows(), core, stubRules{}, hostCfg)
+
+		ks, err := setupKeySubstitution(t.Context(), h)
+		require.NoError(t, err)
+		require.NotNil(t, ks)
+
+		ks.close(t.Context())
+		var del struct {
+			ID string `json:"id"`
+		}
+		require.NoError(t, json.Unmarshal(core.params("proxy_respond_delete"), &del))
+		assert.Equal(t, "sidescale-keysub-"+defaultControlHost, del.ID)
+	})
+
+	t.Run("close_without_responder_noop", func(t *testing.T) {
+		cfg, err := defaultControlConfig()
+		require.NoError(t, err)
+		cfg.KeySubstitution = KeySubSidecarTLS // registered, but no responder
+
+		realKey := key.NewMachine().Public()
+		core := newFakeCore()
+		hostCfg := sidecar.Config{NativeHTTPSend: fakeKeyResponse(realKey)}
+		h := testHandler(t, &cfg, newRecordingFlows(), core, stubRules{}, hostCfg)
+		ks, err := setupKeySubstitution(t.Context(), h)
+		require.NoError(t, err)
+		require.NotNil(t, ks)
+
+		ks.close(t.Context())
+		assert.NotContains(t, core.calls(), "proxy_respond_delete")
 	})
 }
 

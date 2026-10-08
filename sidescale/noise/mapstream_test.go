@@ -41,7 +41,7 @@ func TestMapStreamReader(t *testing.T) {
 	t.Run("no_rule_forwards_verbatim_ordered", func(t *testing.T) {
 		flows := newRecordingFlows()
 		h := testHandler(t, &cfg, flows, noopCore{}, stubRules{}, scsidecar.Config{})
-		parentID, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
+		parentID, _, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
 		require.NoError(t, err)
 
 		r := newMapStreamReader(t.Context(), h, io.NopCloser(bytes.NewReader(frames)), parentID)
@@ -63,7 +63,7 @@ func TestMapStreamReader(t *testing.T) {
 	t.Run("rejects_oversized_frame", func(t *testing.T) {
 		flows := newRecordingFlows()
 		h := testHandler(t, &cfg, flows, noopCore{}, stubRules{}, scsidecar.Config{})
-		parentID, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
+		parentID, _, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
 		require.NoError(t, err)
 
 		// a length prefix over the cap must fail at the buffering seam, not buffer unbounded
@@ -79,7 +79,7 @@ func TestMapStreamReader(t *testing.T) {
 		flows := newRecordingFlows()
 		rules := stubRules{rules: []wire.Rule{{RuleID: "r1", Type: wire.RuleTypeResponseBody, Find: "linux", Replace: "darwin"}}}
 		h := testHandler(t, &cfg, flows, noopCore{}, rules, scsidecar.Config{})
-		parentID, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
+		parentID, _, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
 		require.NoError(t, err)
 
 		in := tsproto.EncodeMapResponseFrame([]byte(`{"Node":{"OS":"linux"}}`), true)
@@ -104,7 +104,7 @@ func TestMapStreamReader(t *testing.T) {
 	t.Run("uncompressed_stream_captured", func(t *testing.T) {
 		flows := newRecordingFlows()
 		h := testHandler(t, &cfg, flows, noopCore{}, stubRules{}, scsidecar.Config{})
-		parentID, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
+		parentID, _, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
 		require.NoError(t, err)
 
 		// a server that did not honor Compress:zstd sends raw-JSON frames
@@ -124,7 +124,7 @@ func TestMapStreamReader(t *testing.T) {
 		flows := newRecordingFlows()
 		rules := stubRules{rules: []wire.Rule{{RuleID: "r1", Type: wire.RuleTypeResponseBody, Find: "linux", Replace: "darwin"}}}
 		h := testHandler(t, &cfg, flows, noopCore{}, rules, scsidecar.Config{})
-		parentID, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
+		parentID, _, err := h.conn.PushFlow(t.Context(), wire.Flow{ProtocolTag: streamProtocolTag, Direction: adapter.DirServerToClient, StartedAt: time.Now()})
 		require.NoError(t, err)
 
 		in := tsproto.EncodeMapResponseFrame([]byte(`{"Node":{"OS":"linux"}}`), false)

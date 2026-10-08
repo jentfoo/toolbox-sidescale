@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/go-analyze/bulk v0.1.6
-	github.com/go-appsec/toolbox v0.2.2
+	github.com/go-appsec/toolbox v0.2.3
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
@@ -27,7 +27,7 @@ require (
 	github.com/hdevalence/ed25519consensus v0.2.0 // indirect
 	github.com/jsimonetti/rtnetlink v1.4.2 // indirect
 	github.com/kamstrup/intmap v0.5.2 // indirect
-	github.com/klauspost/compress v1.20.0 // indirect
+	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/mdlayher/netlink v1.11.2 // indirect
 	github.com/mdlayher/socket v0.7.0 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect

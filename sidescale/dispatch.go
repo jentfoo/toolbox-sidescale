@@ -99,6 +99,13 @@ func (d *dispatcher) routeOpen(p wire.StreamOpenParams) streamSurface {
 	return nil
 }
 
+// OnClose runs in the SDK's cleanup window while the peer still takes RPCs: deregister
+// the sectool-persisted /key responder so it cannot outlive the process. DERP keeps no
+// persisted core state, so only the Noise surface needs cleanup.
+func (d *dispatcher) OnClose(ctx context.Context) {
+	d.noise.Close(ctx)
+}
+
 func (d *dispatcher) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeToolResult, error) {
 	switch {
 	case p.Name == noise.InjectToolName:

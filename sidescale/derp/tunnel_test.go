@@ -102,7 +102,7 @@ func TestEmitTunnelEnvelope(t *testing.T) {
 	t.Run("relay_carries_upstream_headers", func(t *testing.T) {
 		flows := newRecordingFlows()
 		h := testHandler(t, &DerpConfig{DerpHosts: []string{"derp.test"}}, flows, stubRules{})
-		id, err := h.emitTunnelEnvelope(t.Context(), envelopeInfo{
+		id, _, err := h.emitTunnelEnvelope(t.Context(), envelopeInfo{
 			tunnelKey:    "s1",
 			clientAddr:   "1.2.3.4:5",
 			upstreamAddr: "derp.test:443",
@@ -133,7 +133,7 @@ func TestEmitTunnelEnvelope(t *testing.T) {
 	t.Run("terminate_omits_upstream_headers", func(t *testing.T) {
 		flows := newRecordingFlows()
 		h := testHandler(t, &DerpConfig{DerpHosts: []string{"derp.test"}, RelayMode: RelayModeTerminate}, flows, stubRules{})
-		id, err := h.emitTunnelEnvelope(t.Context(), envelopeInfo{
+		id, _, err := h.emitTunnelEnvelope(t.Context(), envelopeInfo{
 			tunnelKey:  "s1",
 			clientPub:  clientPub,
 			clientInfo: &derp.ClientInfo{Version: 2},

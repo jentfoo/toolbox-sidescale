@@ -37,7 +37,6 @@ type Handler struct {
 	cfg          ControlConfig
 	name         string // adapter name, for tunnel envelope paths
 	controlHost  string // host part of cfg.ControlHosts[0]
-	controlPort  int    // client-facing control port (default 443)
 	responderKey key.MachinePrivate
 	machineKey   func(client string) (key.MachinePrivate, error)
 	keysub       *keySubstituter
@@ -52,6 +51,11 @@ type Handler struct {
 	// freshSeq issues unique per_client pool sessions for fresh replay/injection tunnels
 	freshSeq atomic.Uint64
 
+	// setupDone closes when Setup finishes (ok or failed); tunnels accepted during the
+	// startup window wait on it so substitution state is never half-initialized
+	setupDone chan struct{}
+	setupErr  error // Setup's error, read after setupDone closes
+
 	router *sidecar.StreamRouter // shared: accepts claimed streams, dials upstreams
 
 	mu        sync.Mutex
@@ -61,17 +65,17 @@ type Handler struct {
 
 // NewHandler builds the Noise control-surface handler. ctx bounds the connection lifetime and roots handler-spawned work.
 func NewHandler(ctx context.Context, conn *sidecar.Conn, router *sidecar.StreamRouter, cfg *ControlConfig, name string, responderKey key.MachinePrivate, machineKey func(client string) (key.MachinePrivate, error)) *Handler {
-	host, port := addr.Parse(cfg.ControlHosts[0], "https")
+	host, _ := addr.Parse(cfg.ControlHosts[0], "https")
 	h := &Handler{
 		baseCtx:      ctx,
 		conn:         conn,
 		cfg:          *cfg,
 		name:         name,
 		controlHost:  host,
-		controlPort:  port,
 		responderKey: responderKey,
 		machineKey:   machineKey,
 		router:       router,
+		setupDone:    make(chan struct{}),
 		tunnels:      map[string]*activeTunnel{},
 		upstreams:    map[poolKey]*sharedUpstream{},
 	}
@@ -87,17 +91,33 @@ func (h *Handler) SetBindingKeys(reg *bindings.RegisterSigner, hw *ecdsa.Private
 	h.hwSigner = hw
 }
 
-// Setup arms the /key substitution (fetch + responder registration). Call once at startup before serving.
+// Setup arms the /key substitution (fetch + responder registration). Call once at
+// startup; it may run while the dispatcher already serves streams, which waitSetup gates.
 func (h *Handler) Setup(ctx context.Context) error {
 	ks, err := setupKeySubstitution(ctx, h)
-	if err != nil {
-		return err
-	}
 	h.keysub = ks
-	return nil
+	h.setupErr = err
+	close(h.setupDone) // publishes keysub/setupErr
+	return err
 }
 
-// Close tears down the /key substitution responder.
+// waitSetup blocks until Setup has finished, so a tunnel accepted during the startup
+// window never serves with half-initialized substitution state. Borrow needs no setup
+// state and passes at once. ctx bounds the wait.
+func (h *Handler) waitSetup(ctx context.Context) error {
+	if h.cfg.KeyStrategy == KeyStrategyBorrow {
+		return nil
+	}
+	select {
+	case <-h.setupDone:
+		return h.setupErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Close tears down the /key substitution responder. It runs in the dispatcher's
+// OnClose cleanup window, while the peer still accepts RPCs.
 func (h *Handler) Close(ctx context.Context) {
 	if h.keysub != nil {
 		h.keysub.close(ctx)
@@ -110,6 +130,11 @@ func (h *Handler) ServeStream(ctx context.Context, sc *sidecar.StreamConn) {
 	p := sc.Open()
 	switch {
 	case p.Path == ts2021Path:
+		if err := h.waitSetup(ctx); err != nil {
+			h.tunnelError(p.StreamID, "setup pending", err)
+			_ = sc.Close()
+			return
+		}
 		init, err := handshakeInit(p.RequestHeaders)
 		if err != nil {
 			_ = h.conn.Log("error", "ts2021: initiation header", map[string]any{adapter.FieldStream: p.StreamID, adapter.FieldError: err.Error()})
@@ -117,7 +142,12 @@ func (h *Handler) ServeStream(ctx context.Context, sc *sidecar.StreamConn) {
 			return
 		}
 		h.runTunnel(ctx, sc, init)
-	case h.keysub != nil && h.cfg.KeySubstitution == KeySubSidecarTLS:
+	case h.cfg.KeyStrategy == KeyStrategySubstitute && h.cfg.KeySubstitution == KeySubSidecarTLS:
+		if err := h.waitSetup(ctx); err != nil {
+			h.tunnelError(p.StreamID, "setup pending", err)
+			_ = sc.Close()
+			return
+		}
 		h.keysub.serveKey(ctx, sc, p.StreamID)
 	default:
 		_ = sc.Close()

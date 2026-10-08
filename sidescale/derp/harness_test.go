@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -76,6 +77,20 @@ func (f *recordingFlows) Get(id string) (*types.Flow, bool) {
 
 func (f *recordingFlows) ShouldCapture(*types.Flow) bool { return true }
 
+// completedSnapshot clones the completed-flow set for assertions.
+func (f *recordingFlows) completedSnapshot() map[string]bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return maps.Clone(f.completed)
+}
+
+// captureNone excludes every flow, standing in for an operator capture filter that
+// drops the tailscale.derp.* tags. Recording delegates otherwise work normally.
+type captureNone struct{ *recordingFlows }
+
+func (captureNone) ShouldCapture(*types.Flow) bool { return false }
+
 func (f *recordingFlows) list() []*types.Flow {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -113,7 +128,7 @@ func testHandler(t *testing.T, cfg *DerpConfig, flows scsidecar.FlowSink, rules 
 	socket := filepath.Join(t.TempDir(), "sidecar.sock")
 	hostCfg := scsidecar.Config{Socket: socket}
 	mgr := scsidecar.NewManager(hostCfg, &protocol.Registry{}, flows, noopCore{}, rules)
-	lst, err := scsidecar.NewListener(hostCfg, mgr)
+	lst, err := scsidecar.NewListener(t.Context(), hostCfg, mgr)
 	require.NoError(t, err)
 	go func() { _ = lst.Serve() }()
 	t.Cleanup(func() { _ = lst.Close(context.Background()) })

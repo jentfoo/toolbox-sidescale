@@ -66,7 +66,7 @@ func (h *Handler) runTerminate(ctx context.Context, client *sidecar.StreamConn) 
 		return
 	}
 
-	tunnelID, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
+	tunnelID, captured, err := h.emitTunnelEnvelope(ctx, envelopeInfo{
 		tunnelKey:  p.StreamID,
 		clientAddr: p.PeerAddr,
 		clientPub:  clientPub,
@@ -79,8 +79,11 @@ func (h *Handler) runTerminate(ctx context.Context, client *sidecar.StreamConn) 
 		return
 	}
 	// complete the envelope on every subsequent exit so it is never left in-flight;
-	// teardown rides the stream's connection context
-	defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
+	// teardown rides the stream's connection context. An uncaptured envelope (operator
+	// filter) has an empty id: skip the teardown so no junk flow is stored.
+	if captured {
+		defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
+	}
 
 	if err := clientFr.WriteFrame(derpproto.FrameServerInfo, siPayload); err != nil {
 		h.tunnelError(p.StreamID, "write server info", err)
