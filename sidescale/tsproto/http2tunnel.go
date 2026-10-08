@@ -2,9 +2,11 @@ package tsproto
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -87,33 +89,52 @@ func (b *H2Bridge) ServeCapture(ctx context.Context, clientConn net.Conn, captur
 }
 
 // ServeH2Conn serves prior-knowledge HTTP/2 on conn until the conn closes or ctx is
-// canceled. Request contexts derive from ctx via the server BaseContext.
+// canceled. It returns nil once the conn is done serving, ctx.Err when canceled, and
+// the underlying serve error otherwise. Request contexts derive from ctx via the
+// server BaseContext.
 func ServeH2Conn(ctx context.Context, conn net.Conn, h http.Handler) error {
 	srv := &http.Server{Handler: h, Protocols: &http.Protocols{}}
 	srv.Protocols.SetUnencryptedHTTP2(true)
 	srv.BaseContext = func(net.Listener) context.Context { return ctx }
+	l := newSingleConnListener(conn)
 	served := make(chan error, 1)
-	go func() { served <- srv.Serve(&singleConnListener{conn: conn}) }()
+	go func() { served <- srv.Serve(l) }()
 	select {
 	case err := <-served:
+		if errors.Is(err, errConnServed) {
+			return nil // the one conn closed: routine teardown, not a serve failure
+		}
 		return err
 	case <-ctx.Done():
-		_ = conn.Close()
+		_ = l.conn.Close() // ends the served conn and the pending Accept
 		<-served
 		return ctx.Err()
 	}
 }
 
-// singleConnListener feeds one pre-established conn to http.Server.Serve;
-// subsequent Accepts report net.ErrClosed to end the serve loop.
+// errConnServed ends the serve loop once the listener's one conn is done being
+// served; ServeH2Conn maps it to nil since it is routine teardown, not a failure.
+var errConnServed = errors.New("tsproto: conn finished serving")
+
+// singleConnListener feeds one pre-established conn to http.Server.Serve. Accept
+// hands the conn out once, then blocks until it is done being served before
+// reporting errConnServed, so ServeH2Conn stays blocked for the conn's lifetime.
 type singleConnListener struct {
 	conn net.Conn
+	done chan struct{}
 	used bool
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	l := &singleConnListener{done: make(chan struct{})}
+	l.conn = &closeNotifyConn{Conn: conn, onClose: sync.OnceFunc(func() { close(l.done) })}
+	return l
 }
 
 func (l *singleConnListener) Accept() (net.Conn, error) {
 	if l.used {
-		return nil, net.ErrClosed
+		<-l.done
+		return nil, errConnServed
 	}
 	l.used = true
 	return l.conn, nil
@@ -123,6 +144,18 @@ func (l *singleConnListener) Accept() (net.Conn, error) {
 func (l *singleConnListener) Close() error { return nil }
 
 func (l *singleConnListener) Addr() net.Addr { return l.conn.LocalAddr() }
+
+// closeNotifyConn fires onClose when Close is called, marking the conn done
+// being served.
+type closeNotifyConn struct {
+	net.Conn
+	onClose func()
+}
+
+func (c *closeNotifyConn) Close() error {
+	c.onClose()
+	return c.Conn.Close()
+}
 
 // flushingCopy relays src to w, flushing after each read so streamed frames reach the client promptly.
 func flushingCopy(w http.ResponseWriter, src io.Reader) {

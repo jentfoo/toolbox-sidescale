@@ -51,15 +51,23 @@ func servingHandler(t *testing.T, cfg *ControlConfig, serverKey key.MachinePriva
 	return h
 }
 
-// serveTS2021 answers one upstream connection like a real control server: it reads the
+// serveTS2021Loop answers every upstream connection like a real control server,
+// running serveTS2021Conn on each in its own goroutine. It returns when ln closes.
+func serveTS2021Loop(ctx context.Context, ln net.Listener, serverKey key.MachinePrivate) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go serveTS2021Conn(ctx, conn, serverKey)
+	}
+}
+
+// serveTS2021Conn answers one upstream connection like a real control server: it reads the
 // HTTP/1.1 ts2021 upgrade, extracts the base64 Noise initiation, switches protocols, runs
 // the Noise IK responder, sends an early-noise frame, then serves HTTP/2 over the inner conn.
 // It runs in a goroutine and must not touch *testing.T, so errors are best-effort dropped.
-func serveTS2021(ctx context.Context, ln net.Listener, serverKey key.MachinePrivate) {
-	conn, err := ln.Accept()
-	if err != nil {
-		return
-	}
+func serveTS2021Conn(ctx context.Context, conn net.Conn, serverKey key.MachinePrivate) {
 	br := bufio.NewReader(conn)
 	req, err := http.ReadRequest(br)
 	if err != nil {
@@ -108,7 +116,7 @@ func TestUpstreamHandshakeAgainstRealServer(t *testing.T) {
 	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
-	go serveTS2021(t.Context(), ln, serverKey)
+	go serveTS2021Loop(t.Context(), ln, serverKey)
 
 	cfg, err := defaultControlConfig()
 	require.NoError(t, err)
