@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -32,6 +33,8 @@ type injectionRequest struct {
 	PeerKey     string          `json:"peer_key"`
 	Reason      int             `json:"reason"`
 	Flags       int             `json:"flags"`
+	IPPort      string          `json:"ip_port"`
+	AppName     string          `json:"app_name"`
 	Home        bool            `json:"home"`
 	ReconnectMs uint32          `json:"reconnect_ms"`
 	TryForMs    uint32          `json:"try_for_ms"`
@@ -164,9 +167,13 @@ func buildFrameFields(t derpproto.FrameType, known bool, ir injectionRequest) (f
 			return f, err
 		}
 		f.headers = []wire.Header{peer}
-		// tail rides as a header so it survives the frameMessage round-trip; f.tail is  hot-path only and not serialized
-		if ir.Flags != 0 {
-			f.headers = append(f.headers, wire.Header{Name: "X-Derp-Peer-Present-Tail", Value: base64.StdEncoding.EncodeToString([]byte{byte(ir.Flags)})})
+		tail, err := peerPresentTail(ir)
+		if err != nil {
+			return f, err
+		}
+		// tail rides as a header so it survives the frameMessage round-trip, f.tail is hot-path only and not serialized
+		if len(tail) > 0 {
+			f.headers = append(f.headers, wire.Header{Name: "X-Derp-Peer-Present-Tail", Value: base64.StdEncoding.EncodeToString(tail)})
 		}
 	case derpproto.FrameHealth:
 		f.body = []byte(ir.Body)
@@ -191,6 +198,32 @@ func buildFrameFields(t derpproto.FrameType, known bool, ir injectionRequest) (f
 		return f, fmt.Errorf("derp inject: frame %q not injectable", ir.Frame)
 	}
 	return f, nil
+}
+
+// peerPresentTail builds a PEER_PRESENT frame's optional tail. Any of flags, ip_port, or
+// app_name switches the frame to the modern full tail ([16B ip][2B port][1B flags]
+// [1B nameLen][name], zero ip/port when unspecified). With none set the legacy bare-key
+// form keeps no tail, since every real client reads a shorter tail as a no-flags announcement.
+func peerPresentTail(ir injectionRequest) ([]byte, error) {
+	if ir.Flags == 0 && ir.IPPort == "" && ir.AppName == "" {
+		return nil, nil
+	}
+	if ir.Flags < 0 || ir.Flags > 0xff {
+		return nil, fmt.Errorf("derp inject: flags %d does not fit one byte", ir.Flags)
+	}
+	var ipPort netip.AddrPort
+	if ir.IPPort != "" {
+		ap, err := netip.ParseAddrPort(ir.IPPort)
+		if err != nil {
+			return nil, fmt.Errorf("derp inject: invalid ip_port %q: %w", ir.IPPort, err)
+		}
+		ipPort = ap
+	}
+	tail, err := derpproto.BuildPeerPresentTail(ipPort, byte(ir.Flags), ir.AppName)
+	if err != nil {
+		return nil, fmt.Errorf("derp inject: %w", err)
+	}
+	return tail, nil
 }
 
 // packetFields builds a packet frame's fields: a validated node key header plus the opaque base64 payload as body_raw.

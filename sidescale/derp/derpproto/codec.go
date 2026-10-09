@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 
 	"github.com/go-analyze/bulk"
 	"go4.org/mem"
@@ -202,6 +203,69 @@ func OpenServerInfo(clientPriv key.NodePrivate, serverPub key.NodePublic, payloa
 		return nil, err
 	}
 	return &info, nil
+}
+
+// peerPresentTailBaseLen is the modern FramePeerPresent tail length before its app
+// name: 16-byte IP + 2-byte BE port + 1-byte flags + 1-byte app-name length.
+const peerPresentTailBaseLen = 20
+
+// peerPresentAppNameMax is the app-name capacity of its one-byte wire length field.
+const peerPresentAppNameMax = 0xff
+
+// PeerPresentInfo is the decoded tail of a FramePeerPresent payload after its node key.
+// Has* report which optional fields the frame actually carried. Legacy frames stop at any
+// field boundary, matching the reference client's cut-each-field-independently parsing.
+type PeerPresentInfo struct {
+	IPPort     netip.AddrPort // zero unless HasIPPort, IPv4 arrives v6-mapped per the wire encoding
+	HasIPPort  bool
+	Flags      byte
+	HasFlags   bool
+	AppName    string
+	HasAppName bool
+}
+
+// ParsePeerPresentTail decodes a FramePeerPresent tail laid out as
+// [16B IP][2B BE port][1B flags][1B nameLen][name], recognizing a field only when the
+// tail carries it complete, mirroring the reference client's incremental parsing.
+func ParsePeerPresentTail(tail []byte) PeerPresentInfo {
+	var info PeerPresentInfo
+	if len(tail) < 18 { // ip + port
+		return info
+	}
+	info.HasIPPort = true
+	info.IPPort = netip.AddrPortFrom(netip.AddrFrom16([16]byte(tail[:16])).Unmap(), binary.BigEndian.Uint16(tail[16:18]))
+	if len(tail) < 19 {
+		return info
+	}
+	info.HasFlags = true
+	info.Flags = tail[18]
+	if len(tail) < 20 {
+		return info
+	}
+	nameLen := int(tail[19])
+	if len(tail)-20 < nameLen { // truncated app name, client keeps fields parsed so far
+		return info
+	}
+	info.HasAppName = true
+	info.AppName = string(tail[20 : 20+nameLen])
+	return info
+}
+
+// BuildPeerPresentTail encodes a FramePeerPresent tail with the same layout, writing an
+// all-zero IP and port when ipPort is zero. The app name's bytes pass through unvalidated;
+// only its length is constrained to the one-byte wire field.
+func BuildPeerPresentTail(ipPort netip.AddrPort, flags byte, appName string) ([]byte, error) {
+	if len(appName) > peerPresentAppNameMax {
+		return nil, fmt.Errorf("PEER_PRESENT app name %d bytes exceeds the %d-byte wire limit", len(appName), peerPresentAppNameMax)
+	}
+	out := make([]byte, peerPresentTailBaseLen+len(appName))
+	a16 := ipPort.Addr().As16()
+	copy(out[:16], a16[:]) // IPv4 rides v6-mapped, matching sendPeerPresent
+	binary.BigEndian.PutUint16(out[16:18], ipPort.Port())
+	out[18] = flags
+	out[19] = byte(len(appName))
+	copy(out[20:], appName)
+	return out, nil
 }
 
 // IsDisco reports whether a relayed packet payload is a disco message, matching

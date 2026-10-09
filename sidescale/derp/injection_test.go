@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,101 +25,132 @@ func injectArgs(ir injectionRequest) json.RawMessage {
 	return b
 }
 
+// injectToClient registers a relay tunnel "tun", sends ir through the derp_inject tool,
+// and returns the recorded flows plus the single frame its client received.
+func injectToClient(t *testing.T, ir injectionRequest) (*recordingFlows, capturedFrame) {
+	t.Helper()
+
+	flows := newRecordingFlows()
+	h := testHandler(t, relayConfig(), flows, stubRules{})
+	clientRC, _, _ := registerRelayTunnel(h, "tun", false)
+
+	ir.TunnelID = "tun"
+	res, err := h.OnInvokeTool(wire.InvokeToolParams{Name: InjectToolName, Arguments: injectArgs(ir)})
+	require.NoError(t, err)
+	assert.False(t, res.IsError)
+
+	frames := clientRC.frames()
+	require.Len(t, frames, 1)
+	return flows, frames[0]
+}
+
 func TestInjectFrame(t *testing.T) {
 	t.Parallel()
 
+	peer := key.NewNode().Public()
+	src := key.NewNode().Public()
+	packet := []byte("relayed-bytes")
+
 	t.Run("server_to_client", func(t *testing.T) {
-		peer := key.NewNode().Public()
-		src := key.NewNode().Public()
-		packet := []byte("relayed-bytes")
+		t.Run("recv_packet_spoofed_src", func(t *testing.T) {
+			flows, fr := injectToClient(t, injectionRequest{Frame: "RECV_PACKET", SrcKey: src.String(), Body: base64.StdEncoding.EncodeToString(packet)})
+			assert.Equal(t, derpproto.FrameRecvPacket, fr.typ)
+			assert.Equal(t, append(src.AppendTo(nil), packet...), fr.payload)
 
-		cases := []struct {
-			name    string
-			req     injectionRequest
-			wantTyp derpproto.FrameType
-			assert  func(t *testing.T, payload []byte)
-		}{
-			{
-				name:    "recv_packet_spoofed_src",
-				req:     injectionRequest{Frame: "RECV_PACKET", SrcKey: src.String(), Body: base64.StdEncoding.EncodeToString(packet)},
-				wantTyp: derpproto.FrameRecvPacket,
-				assert: func(t *testing.T, payload []byte) {
-					t.Helper()
-					assert.Equal(t, append(src.AppendTo(nil), packet...), payload)
-				},
-			},
-			{
-				name:    "peer_gone",
-				req:     injectionRequest{Frame: "PEER_GONE", PeerKey: peer.String(), Reason: 2},
-				wantTyp: derpproto.FramePeerGone,
-				assert: func(t *testing.T, payload []byte) {
-					t.Helper()
-					assert.Equal(t, peer.AppendTo(nil), payload[:key.NodePublicRawLen])
-					assert.Equal(t, byte(2), payload[key.NodePublicRawLen])
-				},
-			},
-			{
-				name:    "peer_present",
-				req:     injectionRequest{Frame: "PEER_PRESENT", PeerKey: peer.String(), Flags: 1},
-				wantTyp: derpproto.FramePeerPresent,
-				assert: func(t *testing.T, payload []byte) {
-					t.Helper()
-					assert.Equal(t, peer.AppendTo(nil), payload[:key.NodePublicRawLen])
-					assert.Equal(t, byte(1), payload[key.NodePublicRawLen])
-				},
-			},
-			{
-				name:    "health",
-				req:     injectionRequest{Frame: "HEALTH", Body: "degraded"},
-				wantTyp: derpproto.FrameHealth,
-				assert: func(t *testing.T, payload []byte) {
-					t.Helper()
-					assert.Equal(t, []byte("degraded"), payload)
-				},
-			},
-			{
-				name:    "restarting",
-				req:     injectionRequest{Frame: "RESTARTING", ReconnectMs: 1000, TryForMs: 5000},
-				wantTyp: derpproto.FrameRestarting,
-				assert: func(t *testing.T, payload []byte) {
-					t.Helper()
-					require.Len(t, payload, 8)
-					assert.Equal(t, uint32(1000), binary.BigEndian.Uint32(payload[:4]))
-					assert.Equal(t, uint32(5000), binary.BigEndian.Uint32(payload[4:8]))
-				},
-			},
-			{
-				name:    "pong",
-				req:     injectionRequest{Frame: "PONG", Body: base64.StdEncoding.EncodeToString([]byte("12345678"))},
-				wantTyp: derpproto.FramePong,
-				assert: func(t *testing.T, payload []byte) {
-					t.Helper()
-					assert.Equal(t, []byte("12345678"), payload)
-				},
-			},
-		}
+			produced := flows.frameFlows()
+			require.Len(t, produced, 1)
+			assert.Equal(t, true, produced[0].Annotations[adapter.AnnInjected])
+		})
 
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				flows := newRecordingFlows()
-				h := testHandler(t, relayConfig(), flows, stubRules{})
-				clientRC, _, _ := registerRelayTunnel(h, "tun", false)
-				tc.req.TunnelID = "tun"
+		t.Run("peer_gone", func(t *testing.T) {
+			_, fr := injectToClient(t, injectionRequest{Frame: "PEER_GONE", PeerKey: peer.String(), Reason: 2})
+			assert.Equal(t, derpproto.FramePeerGone, fr.typ)
+			require.Len(t, fr.payload, key.NodePublicRawLen+1)
+			assert.Equal(t, peer.AppendTo(nil), fr.payload[:key.NodePublicRawLen])
+			assert.Equal(t, byte(2), fr.payload[key.NodePublicRawLen])
+		})
 
-				res, err := h.OnInvokeTool(wire.InvokeToolParams{Name: InjectToolName, Arguments: injectArgs(tc.req)})
-				require.NoError(t, err)
-				assert.False(t, res.IsError)
+		t.Run("peer_present_flags_tail", func(t *testing.T) {
+			_, fr := injectToClient(t, injectionRequest{Frame: "PEER_PRESENT", PeerKey: peer.String(), Flags: 1})
+			assert.Equal(t, derpproto.FramePeerPresent, fr.typ)
+			// modern tail with a zero ip/port and flags at key+18
+			require.Len(t, fr.payload, key.NodePublicRawLen+20)
+			assert.Equal(t, peer.AppendTo(nil), fr.payload[:key.NodePublicRawLen])
+			assert.Equal(t, make([]byte, 18), fr.payload[key.NodePublicRawLen:key.NodePublicRawLen+18])
+			assert.Equal(t, byte(1), fr.payload[key.NodePublicRawLen+18])
+		})
 
-				frames := clientRC.frames()
-				require.Len(t, frames, 1)
-				assert.Equal(t, tc.wantTyp, frames[0].typ)
-				tc.assert(t, frames[0].payload)
+		t.Run("peer_present_full_tail", func(t *testing.T) {
+			ir := injectionRequest{Frame: "PEER_PRESENT", PeerKey: peer.String(), Flags: 9, IPPort: "1.2.3.4:4433", AppName: "prober"}
+			_, fr := injectToClient(t, ir)
+			assert.Equal(t, derpproto.FramePeerPresent, fr.typ)
+			// key + v6-mapped ip + port + flags + nameLen + name
+			require.Len(t, fr.payload, key.NodePublicRawLen+20+len(ir.AppName))
+			ip := netip.AddrFrom16([16]byte(fr.payload[key.NodePublicRawLen : key.NodePublicRawLen+16])).Unmap()
+			assert.Equal(t, netip.MustParseAddr("1.2.3.4"), ip)
+			tail := fr.payload[key.NodePublicRawLen:]
+			assert.Equal(t, uint16(4433), binary.BigEndian.Uint16(tail[16:]))
+			assert.Equal(t, byte(9), tail[18])
+			assert.Equal(t, byte(len(ir.AppName)), tail[19])
+			assert.Equal(t, ir.AppName, string(tail[20:]))
+		})
 
-				produced := flows.frameFlows()
-				require.Len(t, produced, 1)
-				assert.Equal(t, true, produced[0].Annotations[adapter.AnnInjected])
-			})
-		}
+		t.Run("peer_present_bare_key", func(t *testing.T) {
+			_, fr := injectToClient(t, injectionRequest{Frame: "PEER_PRESENT", PeerKey: peer.String()})
+			assert.Equal(t, derpproto.FramePeerPresent, fr.typ)
+			// legacy form every real client parses as a no-flags announcement
+			assert.Equal(t, peer.AppendTo(nil), fr.payload)
+		})
+
+		t.Run("health", func(t *testing.T) {
+			_, fr := injectToClient(t, injectionRequest{Frame: "HEALTH", Body: "degraded"})
+			assert.Equal(t, derpproto.FrameHealth, fr.typ)
+			assert.Equal(t, []byte("degraded"), fr.payload)
+		})
+
+		t.Run("restarting", func(t *testing.T) {
+			_, fr := injectToClient(t, injectionRequest{Frame: "RESTARTING", ReconnectMs: 1000, TryForMs: 5000})
+			assert.Equal(t, derpproto.FrameRestarting, fr.typ)
+			require.Len(t, fr.payload, 8)
+			assert.Equal(t, uint32(1000), binary.BigEndian.Uint32(fr.payload[:4]))
+			assert.Equal(t, uint32(5000), binary.BigEndian.Uint32(fr.payload[4:8]))
+		})
+
+		t.Run("pong", func(t *testing.T) {
+			_, fr := injectToClient(t, injectionRequest{Frame: "PONG", Body: base64.StdEncoding.EncodeToString([]byte("12345678"))})
+			assert.Equal(t, derpproto.FramePong, fr.typ)
+			assert.Equal(t, []byte("12345678"), fr.payload)
+		})
+
+		t.Run("invalid_flags_rejected", func(t *testing.T) {
+			h := testHandler(t, relayConfig(), newRecordingFlows(), stubRules{})
+			registerRelayTunnel(h, "tun", false)
+
+			ir := injectionRequest{TunnelID: "tun", Frame: "PEER_PRESENT", PeerKey: peer.String(), Flags: 0x1ff}
+			res, err := h.OnInvokeTool(wire.InvokeToolParams{Name: InjectToolName, Arguments: injectArgs(ir)})
+			require.NoError(t, err)
+			assert.True(t, res.IsError)
+		})
+
+		t.Run("invalid_ip_port_rejected", func(t *testing.T) {
+			h := testHandler(t, relayConfig(), newRecordingFlows(), stubRules{})
+			registerRelayTunnel(h, "tun", false)
+
+			ir := injectionRequest{TunnelID: "tun", Frame: "PEER_PRESENT", PeerKey: peer.String(), IPPort: "1.2.3.4"}
+			res, err := h.OnInvokeTool(wire.InvokeToolParams{Name: InjectToolName, Arguments: injectArgs(ir)})
+			require.NoError(t, err)
+			assert.True(t, res.IsError)
+		})
+
+		t.Run("oversize_app_name_rejected", func(t *testing.T) {
+			h := testHandler(t, relayConfig(), newRecordingFlows(), stubRules{})
+			registerRelayTunnel(h, "tun", false)
+
+			ir := injectionRequest{TunnelID: "tun", Frame: "PEER_PRESENT", PeerKey: peer.String(), AppName: strings.Repeat("a", 256)}
+			res, err := h.OnInvokeTool(wire.InvokeToolParams{Name: InjectToolName, Arguments: injectArgs(ir)})
+			require.NoError(t, err)
+			assert.True(t, res.IsError)
+		})
 	})
 
 	t.Run("client_to_server", func(t *testing.T) {
@@ -192,12 +225,12 @@ func TestInjectFrame(t *testing.T) {
 	})
 
 	t.Run("mesh_gating", func(t *testing.T) {
-		peer := key.NewNode().Public()
+		meshPeer := key.NewNode().Public()
 
 		t.Run("rejected_without_mesh", func(t *testing.T) {
 			h := testHandler(t, relayConfig(), newRecordingFlows(), stubRules{})
 			registerRelayTunnel(h, "tun", false)
-			ir := injectionRequest{TunnelID: "tun", Frame: "CLOSE_PEER", PeerKey: peer.String()}
+			ir := injectionRequest{TunnelID: "tun", Frame: "CLOSE_PEER", PeerKey: meshPeer.String()}
 			_, err := h.injectFrame(t.Context(), ir)
 			assert.Error(t, err)
 		})
@@ -205,7 +238,7 @@ func TestInjectFrame(t *testing.T) {
 		t.Run("accepted_with_mesh", func(t *testing.T) {
 			h := testHandler(t, relayConfig(), newRecordingFlows(), stubRules{})
 			_, upstreamRC, _ := registerRelayTunnel(h, "tun", true)
-			ir := injectionRequest{TunnelID: "tun", Frame: "CLOSE_PEER", PeerKey: peer.String()}
+			ir := injectionRequest{TunnelID: "tun", Frame: "CLOSE_PEER", PeerKey: meshPeer.String()}
 			_, err := h.injectFrame(t.Context(), ir)
 			require.NoError(t, err)
 			frames := upstreamRC.frames()

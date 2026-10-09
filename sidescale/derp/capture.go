@@ -120,7 +120,7 @@ type frameFields struct {
 	headers []wire.Header
 	body    []byte // logical text (HEALTH); nil for packet/binary frames
 	bodyRaw []byte // opaque packet payload; nil for non-packet frames
-	tail    []byte // payload bytes preserved verbatim (e.g. PEER_PRESENT ip/port/flags)
+	tail    []byte // payload bytes preserved verbatim (e.g. PEER_PRESENT ip/port/flags/app name)
 }
 
 // decodeFrame parses a steady-state frame payload into typed headers plus a body or
@@ -163,10 +163,20 @@ func decodeFrame(t derpproto.FrameType, payload []byte) frameFields {
 			peer := key.NodePublicFromRaw32(mem.B(payload[:key.NodePublicRawLen]))
 			f.headers = []wire.Header{{Name: "X-Derp-Peer-Key", Value: peer.String()}}
 			f.tail = payload[key.NodePublicRawLen:]
-			// carry the full tail (ip/port/flags) so a captured-frame replay round-trips; the flags header stays as a readable derived value
+			// carry the full tail (ip/port/flags/app name) so a captured-frame replay round-trips.
+			// The other X-Derp-Peer-Present-* headers stay as readable derived values, surfaced
+			// only when the tail carries them. The flags byte sits at tail[18] because modern
+			// servers follow it with an app name, so its last byte is not a reliable substitute.
 			f.headers = append(f.headers, wire.Header{Name: "X-Derp-Peer-Present-Tail", Value: base64.StdEncoding.EncodeToString(f.tail)})
-			if len(f.tail) >= 1 {
-				f.headers = append(f.headers, wire.Header{Name: "X-Derp-Peer-Present-Flags", Value: strconv.Itoa(int(f.tail[len(f.tail)-1]))})
+			pp := derpproto.ParsePeerPresentTail(f.tail)
+			if pp.HasIPPort {
+				f.headers = append(f.headers, wire.Header{Name: "X-Derp-Peer-Present-Addr", Value: pp.IPPort.String()})
+			}
+			if pp.HasFlags { // legacy tails stop before the flags byte, don't guess
+				f.headers = append(f.headers, wire.Header{Name: "X-Derp-Peer-Present-Flags", Value: strconv.Itoa(int(pp.Flags))})
+			}
+			if pp.AppName != "" {
+				f.headers = append(f.headers, wire.Header{Name: "X-Derp-Peer-Present-AppName", Value: pp.AppName})
 			}
 		}
 	case derpproto.FrameNotePreferred:
