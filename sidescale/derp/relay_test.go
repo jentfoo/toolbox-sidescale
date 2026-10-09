@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -318,6 +319,89 @@ func TestSyntheticRelayRoute(t *testing.T) {
 	})
 }
 
+// dupSetSnapshot returns a key's live-conn count and cloned sendHistory under the relay mutex.
+func dupSetSnapshot(t *testing.T, h *Handler, k key.NodePublic) (conns int, hist []*relayClient) {
+	t.Helper()
+	h.relay.mu.Lock()
+	defer h.relay.mu.Unlock()
+
+	cs := h.relay.byKey[k]
+	require.NotNil(t, cs)
+	return len(cs.conns), slices.Clone(cs.sendHistory)
+}
+
+func TestSyntheticRelaySendHistory(t *testing.T) {
+	t.Parallel()
+
+	kPub := key.NewNode().Public()
+	unknown := key.NewNode().Public()
+
+	t.Run("removed_conn_trimmed_from_history", func(t *testing.T) {
+		h := terminateHandler(t, DupPolicyDisableFighters)
+		_, c1 := joinClient(h, kPub, "tun1")
+		_, c2 := joinClient(h, kPub, "tun2")
+		joinClient(h, kPub, "tun3") // silent survivor
+		_, c4 := joinClient(h, kPub, "tun4")
+
+		routePacket(t.Context(), h, c1, unknown, "a") // history [c1, c2]
+		routePacket(t.Context(), h, c2, unknown, "b")
+
+		h.relay.remove(t.Context(), c4) // silent conn departs with three survivors
+		conns, hist := dupSetSnapshot(t, h, kPub)
+		assert.Equal(t, 3, conns)
+		require.Len(t, hist, 2)
+		assert.Same(t, c1, hist[0])
+		assert.Same(t, c2, hist[1])
+
+		h.relay.remove(t.Context(), c2) // a recorded sender departs with two survivors
+		conns, hist = dupSetSnapshot(t, h, kPub)
+		assert.Equal(t, 2, conns)
+		require.Len(t, hist, 1)
+		assert.Same(t, c1, hist[0])
+	})
+
+	t.Run("repeat_sender_not_duplicated", func(t *testing.T) {
+		h := terminateHandler(t, DupPolicyDisableFighters)
+		_, c1 := joinClient(h, kPub, "tun1")
+		_, c2 := joinClient(h, kPub, "tun2")
+
+		routePacket(t.Context(), h, c1, unknown, "a") // history [c1]
+		routePacket(t.Context(), h, c2, unknown, "b") // history [c1, c2]
+		routePacket(t.Context(), h, c1, unknown, "c") // interleaved => fighting
+
+		conns, hist := dupSetSnapshot(t, h, kPub)
+		assert.Equal(t, 2, conns)
+		require.Len(t, hist, 2) // moved to end, not appended a second time
+		assert.Same(t, c2, hist[0])
+		assert.Same(t, c1, hist[1])
+		assert.True(t, c1.disabled) // fight detection unaffected by the dedupe
+		assert.True(t, c2.disabled)
+	})
+
+	t.Run("churn_bounded_by_live_conns", func(t *testing.T) {
+		h := terminateHandler(t, DupPolicyDisableFighters)
+		joinClient(h, kPub, "tunP1") // persistent pair never speaks
+		joinClient(h, kPub, "tunP2")
+
+		const rounds = 50
+		for i := range rounds {
+			_, c := joinClient(h, kPub, "tunC"+strconv.Itoa(i))
+			routePacket(t.Context(), h, c, unknown, "x") // sole send by the short-lived conn
+
+			conns, hist := dupSetSnapshot(t, h, kPub)
+			assert.LessOrEqual(t, len(hist), conns) // bounded while the churn conn is live
+			h.relay.remove(t.Context(), c)
+
+			conns, hist = dupSetSnapshot(t, h, kPub)
+			require.Equal(t, 2, conns)
+			assert.False(t, slices.Contains(hist, c)) // departed sender never lingers
+		}
+
+		_, hist := dupSetSnapshot(t, h, kPub)
+		assert.Empty(t, hist) // only the silent pair remains; nothing recorded
+	})
+}
+
 // feedConn is a recordConn that also serves preset bytes on Read, for driving terminateLoop.
 type feedConn struct {
 	recordConn
@@ -326,8 +410,6 @@ type feedConn struct {
 
 func (c *feedConn) Read(p []byte) (int, error) { return c.rd.Read(p) }
 
-// TestTerminateLoop drives one SendPacket through terminateLoop and asserts the peer
-// receives it, guarding that routing uses captureFrame's returned bytes.
 func TestTerminateLoop(t *testing.T) {
 	t.Parallel()
 

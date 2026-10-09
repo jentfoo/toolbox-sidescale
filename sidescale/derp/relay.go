@@ -183,10 +183,13 @@ type relayClient struct {
 
 // clientSet holds every live connection sharing one node key and the active receive target.
 type clientSet struct {
-	active      *relayClient   // RecvPacket target; nil while a fighting set is disabled
-	last        *relayClient   // most recent sender, drives active selection
-	conns       []*relayClient // live connections, connect order (most recent last)
-	sendHistory []*relayClient // senders in order, for disable_fighters detection
+	active *relayClient   // RecvPacket target; nil while a fighting set is disabled
+	last   *relayClient   // most recent sender, drives active selection
+	conns  []*relayClient // live connections, connect order (most recent last)
+	// sendHistory records senders least to most recent for disable_fighters detection.
+	// Each conn appears at most once: repeats move it to the end and removals trim it,
+	// keeping the slice bounded by len(conns).
+	sendHistory []*relayClient
 }
 
 // syntheticRelay is the terminate-mode registry of connected clients keyed by node key,
@@ -244,6 +247,8 @@ func (r *syntheticRelay) remove(ctx context.Context, c *relayClient) {
 		if cs.last == c {
 			cs.last = nil
 		}
+		// trim the departing conn in every branch so departed pointers never linger
+		cs.sendHistory = slices.DeleteFunc(cs.sendHistory, func(x *relayClient) bool { return x == c })
 		switch len(cs.conns) {
 		case 0:
 			delete(r.byKey, c.clientKey)
@@ -317,11 +322,14 @@ func (r *syntheticRelay) noteActivity(src *relayClient) {
 	if len(cs.sendHistory) > 0 && cs.sendHistory[len(cs.sendHistory)-1] == src {
 		return // already the last sender
 	}
-	if slices.Contains(cs.sendHistory, src) { // interleaved senders => fighting
+	// record src as the most recent sender, deduped move-to-end so each conn appears
+	// at most once and the slice stays bounded by len(cs.conns)
+	if i := slices.Index(cs.sendHistory, src); i >= 0 { // interleaved senders => fighting
 		for _, x := range cs.conns {
 			x.disabled = true
 		}
 		cs.active = nil
+		cs.sendHistory = slices.Delete(cs.sendHistory, i, i+1)
 	}
 	cs.sendHistory = append(cs.sendHistory, src)
 }
