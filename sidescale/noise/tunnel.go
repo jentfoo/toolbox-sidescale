@@ -178,11 +178,11 @@ func (u *upstreamConn) close() {
 // handshake as initiator with machineKey, and builds the HTTP/2 bridge over it.
 // Shared by the client-driven tunnel and the replay/injection fresh-tunnel paths.
 func (h *Handler) openUpstream(ctx context.Context, controlHost string, machineKey key.MachinePrivate, version uint16, parentFlowID string) (*upstreamConn, error) {
-	serverPub, err := h.upstreamServerKey(ctx)
+	serverPub, err := h.upstreamServerKey(ctx, controlHost)
 	if err != nil {
 		return nil, fmt.Errorf("upstream key: %w", err)
 	}
-	serverLegacy, err := h.upstreamLegacyKey(ctx)
+	serverLegacy, err := h.upstreamLegacyKey(ctx, controlHost)
 	if err != nil {
 		return nil, fmt.Errorf("upstream legacy key: %w", err)
 	}
@@ -380,22 +380,30 @@ func (h *Handler) openFreshTunnel(ctx context.Context, controlHost string, machi
 	return at, cleanup, nil
 }
 
-// upstreamServerKey resolves the real upstream server Noise key: the borrowed key's
-// public half, or the substitute strategy's fetched-and-cached upstream key.
-func (h *Handler) upstreamServerKey(ctx context.Context) (key.MachinePublic, error) {
+// upstreamServerKey resolves the real upstream server Noise key for controlHost: the
+// borrowed key's public half, or the substitute strategy's fetched-and-cached upstream key.
+func (h *Handler) upstreamServerKey(ctx context.Context, controlHost string) (key.MachinePublic, error) {
 	if h.cfg.KeyStrategy == KeyStrategyBorrow {
 		return h.responderKey.Public(), nil
 	}
-	return h.keysub.realServerKey(ctx)
+	ks := h.keysubFor(controlHost)
+	if ks == nil {
+		return key.MachinePublic{}, fmt.Errorf("no substitution state for host %q", controlHost)
+	}
+	return ks.realServerKey(ctx)
 }
 
 // upstreamLegacyKey resolves the real upstream legacy machine key bound by the register SignatureV2 hash.
 // Zero under borrow, where operator-controlled upstreams do not use device-cert SignatureV2.
-func (h *Handler) upstreamLegacyKey(ctx context.Context) (key.MachinePublic, error) {
+func (h *Handler) upstreamLegacyKey(ctx context.Context, controlHost string) (key.MachinePublic, error) {
 	if h.cfg.KeyStrategy == KeyStrategyBorrow {
 		return key.MachinePublic{}, nil
 	}
-	return h.keysub.realLegacyServerKey(ctx)
+	ks := h.keysubFor(controlHost)
+	if ks == nil {
+		return key.MachinePublic{}, fmt.Errorf("no substitution state for host %q", controlHost)
+	}
+	return ks.realLegacyServerKey(ctx)
 }
 
 // upstreamDial resolves the dial target and transport scheme, honoring upstream_overrides and the

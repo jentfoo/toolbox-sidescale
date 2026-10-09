@@ -10,6 +10,7 @@ import (
 
 	"tailscale.com/types/key"
 
+	"github.com/go-appsec/toolbox/pkg/addr"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/adapter"
@@ -22,6 +23,7 @@ const InjectToolName = "tailscale_inject"
 // injectionRequest is the injection_target payload.
 type injectionRequest struct {
 	TunnelID    string            `json:"tunnel_id"`
+	ControlHost string            `json:"control_host"`
 	Endpoint    string            `json:"endpoint"`
 	Method      string            `json:"method"`
 	Headers     map[string]string `json:"headers"`
@@ -80,6 +82,16 @@ func (h *Handler) injectObject(ctx context.Context, ir injectionRequest) (wire.S
 	if len(ir.Body) == 0 {
 		return wire.SidecarSendResult{}, false, errors.New("inject: body required")
 	}
+	// fresh tunnels default to the primary control host; control_host overrides, but must
+	// be a configured host so substitution state and the dial target exist for it
+	freshHost := h.controlHost
+	if ir.ControlHost != "" {
+		host, _ := addr.Parse(ir.ControlHost, "https")
+		if !h.isControlHost(host) {
+			return wire.SidecarSendResult{}, false, fmt.Errorf("inject: control_host %q is not a configured control host", ir.ControlHost)
+		}
+		freshHost = host
+	}
 	method := ir.Method
 	if method == "" {
 		method = http.MethodPost
@@ -121,7 +133,7 @@ func (h *Handler) injectObject(ctx context.Context, ir injectionRequest) (wire.S
 		if ir.AsVersion != 0 {
 			version = ir.AsVersion
 		}
-		if at, cleanup, err = h.openFreshTunnel(ctx, h.controlHost, mk, version, h.freshPoolSession()); err != nil {
+		if at, cleanup, err = h.openFreshTunnel(ctx, freshHost, mk, version, h.freshPoolSession()); err != nil {
 			return wire.SidecarSendResult{}, false, h.sendFailed("inject", ir.Endpoint, "open tunnel", nil, false, err)
 		}
 	}
@@ -234,6 +246,8 @@ func injectSummary(ir injectionRequest, ids []string, reused bool) string {
 	target := "a fresh tunnel"
 	if reused {
 		target = "live tunnel " + ir.TunnelID
+	} else if ir.ControlHost != "" {
+		target = "a fresh tunnel to " + ir.ControlHost
 	}
 	return fmt.Sprintf("Injected %s %s into %s; produced flow(s): %s", strings.ToUpper(method), ir.Endpoint, target, strings.Join(ids, ", "))
 }

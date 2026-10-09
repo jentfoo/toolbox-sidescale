@@ -17,12 +17,15 @@ func TestDispatcherRouteOpen(t *testing.T) {
 	nh := &noise.Handler{}
 	dh := &derp.Handler{}
 
-	newDisp := func(t *testing.T, derpCfg *derp.DerpConfig, keySub string) *dispatcher {
+	newDisp := func(t *testing.T, derpCfg *derp.DerpConfig, keySub string, controlHosts ...string) *dispatcher {
 		t.Helper()
 
 		cfg, err := LoadConfig("")
 		require.NoError(t, err)
 		cfg.Control.KeySubstitution = keySub
+		if len(controlHosts) > 0 {
+			cfg.Control.ControlHosts = controlHosts
+		}
 		cfg.Derp = derpCfg
 		var handler *derp.Handler
 		if derpCfg != nil {
@@ -37,25 +40,29 @@ func TestDispatcherRouteOpen(t *testing.T) {
 	terminatePorted := &derp.DerpConfig{DerpHosts: []string{"derp.test:3340"}, RelayMode: derp.RelayModeTerminate}
 
 	tests := []struct {
-		name    string
-		derpCfg *derp.DerpConfig
-		keySub  string
-		params  wire.StreamOpenParams
-		want    streamSurface
+		name         string
+		derpCfg      *derp.DerpConfig
+		keySub       string
+		controlHosts []string
+		params       wire.StreamOpenParams
+		want         streamSurface
 	}{
-		{"ts2021_to_noise", nil, noise.KeySubResponder, wire.StreamOpenParams{Path: "/ts2021"}, nh},
-		{"derp_path_nil_derp", nil, noise.KeySubResponder, wire.StreamOpenParams{Path: "/derp"}, nil},
-		{"derp_path_relay", relay, noise.KeySubResponder, wire.StreamOpenParams{Path: "/derp"}, dh},
-		{"ts2021_with_derp", relay, noise.KeySubResponder, wire.StreamOpenParams{Path: "/ts2021"}, nh},
-		{"terminate_host_match", terminate, noise.KeySubResponder, wire.StreamOpenParams{Host: "derp.test"}, dh},
-		{"terminate_ported_host_match", terminatePorted, noise.KeySubResponder, wire.StreamOpenParams{Host: "derp.test"}, dh},
-		{"terminate_host_miss", terminate, noise.KeySubResponder, wire.StreamOpenParams{Host: "other.test"}, nil},
-		{"sidecar_tls_control_host", nil, noise.KeySubSidecarTLS, wire.StreamOpenParams{Host: controlHost}, nh},
-		{"empty_no_match", nil, noise.KeySubResponder, wire.StreamOpenParams{}, nil},
+		{"ts2021_to_noise", nil, noise.KeySubResponder, nil, wire.StreamOpenParams{Path: "/ts2021"}, nh},
+		{"derp_path_nil_derp", nil, noise.KeySubResponder, nil, wire.StreamOpenParams{Path: "/derp"}, nil},
+		{"derp_path_relay", relay, noise.KeySubResponder, nil, wire.StreamOpenParams{Path: "/derp"}, dh},
+		{"ts2021_with_derp", relay, noise.KeySubResponder, nil, wire.StreamOpenParams{Path: "/ts2021"}, nh},
+		{"terminate_host_match", terminate, noise.KeySubResponder, nil, wire.StreamOpenParams{Host: "derp.test"}, dh},
+		{"terminate_ported_host_match", terminatePorted, noise.KeySubResponder, nil, wire.StreamOpenParams{Host: "derp.test"}, dh},
+		{"terminate_host_miss", terminate, noise.KeySubResponder, nil, wire.StreamOpenParams{Host: "other.test"}, nil},
+		{"sidecar_tls_control_host", nil, noise.KeySubSidecarTLS, nil, wire.StreamOpenParams{Host: controlHost}, nh},
+		{"empty_no_match", nil, noise.KeySubResponder, nil, wire.StreamOpenParams{}, nil},
+		{"sidecar_tls_any_control_host", nil, noise.KeySubSidecarTLS, []string{"ctrl1.test", "ctrl2.test"}, wire.StreamOpenParams{Host: "ctrl2.test"}, nh},
+		{"sidecar_tls_ported_config_host", nil, noise.KeySubSidecarTLS, []string{"ctrl1.test", "ctrl2.test:8443"}, wire.StreamOpenParams{Host: "ctrl2.test"}, nh},
+		{"sidecar_tls_unconfigured_host", nil, noise.KeySubSidecarTLS, []string{"ctrl1.test"}, wire.StreamOpenParams{Host: "ctrl2.test"}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := newDisp(t, tt.derpCfg, tt.keySub)
+			d := newDisp(t, tt.derpCfg, tt.keySub, tt.controlHosts...)
 			assert.Equal(t, tt.want, d.routeOpen(tt.params))
 		})
 	}

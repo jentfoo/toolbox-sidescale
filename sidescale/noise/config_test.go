@@ -18,6 +18,12 @@ func TestControlConfigValidate(t *testing.T) {
 		return c
 	}
 
+	t.Run("empty_control_host_rejected", func(t *testing.T) {
+		c := defaulted()
+		c.ControlHosts = []string{"ctrl1.test", ""}
+		require.ErrorContains(t, c.Validate(), "control_hosts")
+	})
+
 	t.Run("defaults_valid", func(t *testing.T) {
 		c := defaulted()
 		require.NoError(t, c.Validate())

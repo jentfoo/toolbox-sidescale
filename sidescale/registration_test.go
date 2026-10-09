@@ -172,6 +172,61 @@ func TestBuildRegistration(t *testing.T) {
 		assert.Equal(t, wire.PortRange{Low: 3340, High: 3340}, reg.Capabilities.EarlyClaims[1].PortRange)
 	})
 
+	t.Run("control_multi_host", func(t *testing.T) {
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		cfg.Control.ControlHosts = []string{"ctrl1.example.com", "ctrl2.example.com:8443"}
+		reg := buildRegistration(cfg, testInstanceID)
+
+		// one /ts2021 upgrade claim per configured host
+		require.Len(t, reg.Capabilities.UpgradeClaims, 2)
+		assert.Equal(t, "ctrl1.example.com", reg.Capabilities.UpgradeClaims[0].HostPattern)
+		assert.Equal(t, "ctrl2.example.com", reg.Capabilities.UpgradeClaims[1].HostPattern)
+		for _, c := range reg.Capabilities.UpgradeClaims {
+			assert.Equal(t, "/ts2021", c.PathPattern)
+		}
+		assert.Empty(t, reg.Capabilities.EarlyClaims)
+	})
+
+	t.Run("control_sidecar_tls_multi_host", func(t *testing.T) {
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		cfg.Control.ControlHosts = []string{"ctrl1.example.com:8443", "ctrl2.example.com"}
+		cfg.Control.KeySubstitution = noise.KeySubSidecarTLS
+		reg := buildRegistration(cfg, testInstanceID)
+
+		assert.Len(t, reg.Capabilities.UpgradeClaims, 2)
+		require.Len(t, reg.Capabilities.EarlyClaims, 2) // one control TLS claim per host
+		assert.Equal(t, "ctrl1.example.com", reg.Capabilities.EarlyClaims[0].HostMatch)
+		assert.Equal(t, wire.PortRange{Low: 8443, High: 8443}, reg.Capabilities.EarlyClaims[0].PortRange)
+		assert.Equal(t, "ctrl2.example.com", reg.Capabilities.EarlyClaims[1].HostMatch)
+		assert.Equal(t, wire.PortRange{Low: 443, High: 443}, reg.Capabilities.EarlyClaims[1].PortRange)
+		for _, ec := range reg.Capabilities.EarlyClaims {
+			require.NotNil(t, ec.TLS)
+			assert.Equal(t, ec.HostMatch, ec.TLS.SNIMatch)
+		}
+
+		// the per-host literal claims must compile host-side, i.e. register cleanly
+		_, _, socket := startHost(t, filepath.Join(t.TempDir(), "sidecar.sock"))
+		conn, err := sidecar.Dial(t.Context(), socket, reg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = conn.Close() })
+	})
+
+	t.Run("control_duplicate_hosts_dedup", func(t *testing.T) {
+		cfg, err := LoadConfig("")
+		require.NoError(t, err)
+		cfg.Control.ControlHosts = []string{"ctrl1.example.com", "CTRL1.example.com:443", "ctrl2.example.com"}
+		cfg.Control.KeySubstitution = noise.KeySubSidecarTLS
+		reg := buildRegistration(cfg, testInstanceID)
+
+		// one claim set per distinct host, not per config spelling
+		require.Len(t, reg.Capabilities.UpgradeClaims, 2)
+		require.Len(t, reg.Capabilities.EarlyClaims, 2)
+		assert.Equal(t, "ctrl1.example.com", reg.Capabilities.UpgradeClaims[0].HostPattern)
+		assert.Equal(t, "ctrl2.example.com", reg.Capabilities.UpgradeClaims[1].HostPattern)
+	})
+
 	// toolbox ffa8492 compiles plain-dot claim patterns as literals, so config hosts
 	// must pass through verbatim: no local escaping, no wildcard handling
 	t.Run("host_patterns_verbatim", func(t *testing.T) {

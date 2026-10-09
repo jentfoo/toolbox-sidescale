@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -154,15 +156,15 @@ func (noopCore) CoreToolNames() []string { return nil }
 // params and call order of each tool invocation.
 type fakeCore struct {
 	mu      sync.Mutex
-	invoked map[string]json.RawMessage
+	invoked map[string][]json.RawMessage
 	order   []string
 }
 
-func newFakeCore() *fakeCore { return &fakeCore{invoked: map[string]json.RawMessage{}} }
+func newFakeCore() *fakeCore { return &fakeCore{invoked: map[string][]json.RawMessage{}} }
 
 func (c *fakeCore) CoreInvoke(_ context.Context, tool string, params json.RawMessage) (string, bool, error) {
 	c.mu.Lock()
-	c.invoked[tool] = params
+	c.invoked[tool] = append(c.invoked[tool], params)
 	c.order = append(c.order, tool)
 	c.mu.Unlock()
 	switch tool {
@@ -181,7 +183,19 @@ func (c *fakeCore) params(tool string) json.RawMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	return c.invoked[tool]
+	calls := c.invoked[tool]
+	if len(calls) == 0 {
+		return nil
+	}
+	return calls[len(calls)-1]
+}
+
+// allParams returns every recorded params payload for tool, in call order.
+func (c *fakeCore) allParams(tool string) []json.RawMessage {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return slices.Clone(c.invoked[tool])
 }
 
 // calls returns the ordered tool names CoreInvoke saw.
@@ -192,10 +206,47 @@ func (c *fakeCore) calls() []string {
 	return slices.Clone(c.order)
 }
 
+// failAddCore fails proxy_respond_add when its params name failHost, standing in for
+// a host-side registration refusal mid-setup.
+type failAddCore struct {
+	*fakeCore
+	failHost string
+}
+
+func (c *failAddCore) CoreInvoke(ctx context.Context, tool string, params json.RawMessage) (string, bool, error) {
+	if tool == "proxy_respond_add" && strings.Contains(string(params), c.failHost) {
+		return "", false, errors.New("responder add refused")
+	}
+	return c.fakeCore.CoreInvoke(ctx, tool, params)
+}
+
 // fakeKeyResponse returns a NativeHTTPSend hook that answers /key with the given server public key.
 func fakeKeyResponse(realKey key.MachinePublic) func(context.Context, wire.SidecarSendParams, string) (wire.SidecarSendResult, *wire.Error) {
 	body := []byte(`{"publicKey":"` + realKey.String() + `"}`)
 	return func(context.Context, wire.SidecarSendParams, string) (wire.SidecarSendResult, *wire.Error) {
+		return wire.SidecarSendResult{Response: &wire.FlowMessage{StatusCode: 200, Body: body}}, nil
+	}
+}
+
+// fakeKeyResponseByHost returns a NativeHTTPSend hook that answers /key with a distinct
+// server key per URL host, standing in for independent upstream coordinators.
+func fakeKeyResponseByHost(keys map[string]key.MachinePublic) func(context.Context, wire.SidecarSendParams, string) (wire.SidecarSendResult, *wire.Error) {
+	return func(_ context.Context, p wire.SidecarSendParams, _ string) (wire.SidecarSendResult, *wire.Error) {
+		var target struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(p.Target, &target); err != nil {
+			return wire.SidecarSendResult{}, wire.NewError(1, "bad target")
+		}
+		u, err := url.Parse(target.URL)
+		if err != nil {
+			return wire.SidecarSendResult{}, wire.NewError(1, "bad url")
+		}
+		pub, ok := keys[u.Hostname()]
+		if !ok {
+			return wire.SidecarSendResult{}, wire.NewError(1, "no key for host "+u.Hostname())
+		}
+		body := []byte(`{"publicKey":"` + pub.String() + `"}`)
 		return wire.SidecarSendResult{Response: &wire.FlowMessage{StatusCode: 200, Body: body}}, nil
 	}
 }

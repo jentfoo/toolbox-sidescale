@@ -16,14 +16,15 @@ import (
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 
+	"github.com/go-appsec/toolbox/pkg/addr"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/adapter"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/tsproto"
 )
 
-// keySubstituter implements the substitute strategy's /key handling. It learns the
-// real upstream Noise key once and serves a substituted /key body: via a registered
-// native-proxy responder (responder mode) or in the byte path on a host-terminated
-// control claim (sidecar_tls mode).
+// keySubstituter implements the substitute strategy's /key handling for one control
+// host. It learns the real upstream Noise key once and serves a substituted /key body:
+// via a registered native-proxy responder (responder mode) or in the byte path on a
+// host-terminated control claim (sidecar_tls mode).
 type keySubstituter struct {
 	h           *Handler
 	controlHost string
@@ -36,28 +37,49 @@ type keySubstituter struct {
 	subBody   []byte
 }
 
-// setupKeySubstitution provisions /key substitution for the substitute strategy,
-// returning nil for borrow (which needs none). Under responder mode it registers
-// the substituted /key response after learning the real key.
-func setupKeySubstitution(ctx context.Context, h *Handler) (*keySubstituter, error) {
+// setupKeySubstitution provisions /key substitution for the substitute strategy, one
+// entry per configured control host keyed by parsed host, returning nil for borrow
+// (which needs none). Every host's real key is learned before any responder registers,
+// so a fetch can never loop back onto this sidecar's own substituted /key entry. On
+// error the partially built map is returned so callers can still clean up responders
+// that registered before the failure.
+func setupKeySubstitution(ctx context.Context, h *Handler) (map[string]*keySubstituter, error) {
 	if h.cfg.KeyStrategy != KeyStrategySubstitute {
 		return nil, nil
 	}
-	ks := &keySubstituter{h: h, controlHost: h.controlHost}
-	// learn the real key before registering any responder to avoid a self-loop
-	if err := ks.ensureFetched(ctx); err != nil {
-		return nil, err
+	var order []*keySubstituter // config order, for deterministic responder registration
+	subs := map[string]*keySubstituter{}
+	for _, ch := range h.cfg.ControlHosts {
+		host, _ := addr.Parse(ch, "https")
+		if _, ok := subs[host]; ok {
+			continue // same host under different ports shares one entry
+		}
+		ks := &keySubstituter{h: h, controlHost: host}
+		if err := ks.ensureFetched(ctx); err != nil {
+			return subs, fmt.Errorf("%s: %w", host, err)
+		}
+		subs[host] = ks
+		order = append(order, ks)
 	}
 	if h.cfg.KeySubstitution == KeySubResponder {
-		body, err := ks.substitutedBody(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if err := ks.registerResponder(ctx, body); err != nil {
-			return nil, fmt.Errorf("register /key responder: %w", err)
+		for _, ks := range order {
+			body, err := ks.substitutedBody(ctx)
+			if err != nil {
+				return subs, err
+			}
+			if err := ks.registerResponder(ctx, body); err != nil {
+				return subs, fmt.Errorf("register /key responder: %w", err)
+			}
 		}
 	}
-	return ks, nil
+	return subs, nil
+}
+
+// keysubFor returns the /key substitution state for host (any case or port form),
+// nil when host is not a configured control host.
+func (h *Handler) keysubFor(host string) *keySubstituter {
+	parsed, _ := addr.Parse(host, "https")
+	return h.keysub[parsed]
 }
 
 // responderLabel is the stable proxy_respond label for the /key entry. Responders

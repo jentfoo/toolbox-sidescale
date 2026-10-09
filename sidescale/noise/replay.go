@@ -13,6 +13,7 @@ import (
 
 	"tailscale.com/types/key"
 
+	"github.com/go-appsec/toolbox/pkg/addr"
 	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/adapter"
@@ -77,7 +78,13 @@ func (h *Handler) replay(ctx context.Context, p wire.SidecarSendParams) (wire.Si
 	// intentionally re-routes rebind to the new endpoint's binding set
 	endpoint := req.Path
 
-	at, cleanup, crossTunnel, err := h.selectTunnel(ctx, src.ParentFlowID, endpoint, bodyVersion(req.Body))
+	// a fresh tunnel dials the source's coordinator: :authority names it, so a
+	// dead-tunnel fallback or register replay never silently moves host
+	freshHost := h.controlHost
+	if host := authorityHost(req.Headers); host != "" {
+		freshHost = host
+	}
+	at, cleanup, crossTunnel, err := h.selectTunnel(ctx, freshHost, src.ParentFlowID, endpoint, bodyVersion(req.Body))
 	if err != nil {
 		return wire.SidecarSendResult{}, h.sendFailed("replay", endpoint, "select tunnel", nil, false, err)
 	}
@@ -123,12 +130,13 @@ func (h *Handler) replay(ctx context.Context, p wire.SidecarSendParams) (wire.Si
 // selectTunnel picks the upstream tunnel for a replay of endpoint: register always opens a
 // fresh dedicated-session tunnel (one-shot, non-idempotent — never reuse or coalesce onto a
 // live conn), other endpoints reuse the source flow's still-open tunnel when present else a
-// fresh pooled one. crossTunnel is true whenever a fresh tunnel is opened; its cleanup must be deferred.
-func (h *Handler) selectTunnel(ctx context.Context, tunnelID, endpoint string, version uint16) (at *activeTunnel, cleanup func(), crossTunnel bool, err error) {
+// fresh pooled one. Fresh tunnels dial freshHost, the source request's coordinator.
+// crossTunnel is true whenever a fresh tunnel is opened; its cleanup must be deferred.
+func (h *Handler) selectTunnel(ctx context.Context, freshHost, tunnelID, endpoint string, version uint16) (at *activeTunnel, cleanup func(), crossTunnel bool, err error) {
 	// fresh originate identity, distinct from any live client's node session
 	mk := key.NewMachine()
 	if endpoint == registerEndpoint {
-		at, cleanup, err = h.openFreshTunnel(ctx, h.controlHost, mk, version, h.dedicatedPoolSession())
+		at, cleanup, err = h.openFreshTunnel(ctx, freshHost, mk, version, h.dedicatedPoolSession())
 		if err != nil {
 			return nil, nil, false, err
 		}
@@ -142,7 +150,7 @@ func (h *Handler) selectTunnel(ctx context.Context, tunnelID, endpoint string, v
 			return at, release, false, nil
 		}
 	}
-	at, cleanup, err = h.openFreshTunnel(ctx, h.controlHost, mk, version, h.freshPoolSession())
+	at, cleanup, err = h.openFreshTunnel(ctx, freshHost, mk, version, h.freshPoolSession())
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -299,6 +307,18 @@ func (h *Handler) emitProduced(ctx context.Context, req *wire.FlowMessage, resp 
 		return wire.SidecarSendResult{Response: respMsg}, nil
 	}
 	return wire.SidecarSendResult{NewFlowIDs: []string{id}, Response: respMsg}, nil
+}
+
+// authorityHost extracts the :authority pseudo-header's host from captured request
+// headers, "" when absent.
+func authorityHost(headers []wire.Header) string {
+	for _, hd := range headers {
+		if hd.Name == tsproto.HdrAuthority {
+			host, _ := addr.Parse(hd.Value, "https")
+			return host
+		}
+	}
+	return ""
 }
 
 // normalizePathQuery lifts a query embedded in the :path pseudo-header into the

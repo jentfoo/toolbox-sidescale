@@ -355,6 +355,34 @@ func TestReplay(t *testing.T) {
 		assert.Equal(t, "foo=bar", <-gotQuery)
 	})
 
+	t.Run("fresh_falls_back_to_source_host", func(t *testing.T) {
+		cfg, err := defaultControlConfig()
+		require.NoError(t, err)
+		cfg.ControlHosts = []string{"ctrl1.test", "ctrl2.test"}
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+		h.controlHost = "ctrl1.test" // primary; the source flow names the other host
+
+		var gotHost string
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			gotHost = host
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+
+		// dead-tunnel fallback: the fresh tunnel dials the source's :authority host,
+		// not the primary control host
+		src := &wire.Flow{
+			ProtocolTag:  controlProtocolTag,
+			ParentFlowID: "deadTunnel",
+			Request: &wire.FlowMessage{Method: http.MethodPost, Path: mapEndpoint, Headers: []wire.Header{
+				{Name: ":method", Value: "POST"}, {Name: ":path", Value: mapEndpoint}, {Name: ":authority", Value: "ctrl2.test"},
+			}, Body: []byte(`{}`)},
+		}
+		res, err := h.replay(t.Context(), wire.SidecarSendParams{Flow: src})
+		require.NoError(t, err)
+		require.NotNil(t, res.Response)
+		assert.Equal(t, "ctrl2.test", gotHost)
+	})
+
 	t.Run("capture_filtered_reports_no_ids", func(t *testing.T) {
 		flows := captureNone{newRecordingFlows()}
 		h := testHandler(t, &cfg, flows, noopCore{}, stubRules{}, scsidecar.Config{})
@@ -390,7 +418,7 @@ func TestSelectTunnel(t *testing.T) {
 		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
 			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
-		at, cleanup, cross, err := h.selectTunnel(t.Context(), "tunnelX", registerEndpoint, ver)
+		at, cleanup, cross, err := h.selectTunnel(t.Context(), h.controlHost, "tunnelX", registerEndpoint, ver)
 		require.NoError(t, err)
 		t.Cleanup(cleanup)
 		assert.True(t, cross)
@@ -402,7 +430,7 @@ func TestSelectTunnel(t *testing.T) {
 	t.Run("map_reuses_existing", func(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
 		existing := fakeTunnel(t, h, "tunnelX", okSrv())
-		at, cleanup, cross, err := h.selectTunnel(t.Context(), "tunnelX", mapEndpoint, ver)
+		at, cleanup, cross, err := h.selectTunnel(t.Context(), h.controlHost, "tunnelX", mapEndpoint, ver)
 		require.NoError(t, err)
 		t.Cleanup(cleanup)
 		assert.False(t, cross)
@@ -417,13 +445,53 @@ func TestSelectTunnel(t *testing.T) {
 			gotVersion = version
 			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
 		}
-		at, cleanup, cross, err := h.selectTunnel(t.Context(), "no-such-tunnel", mapEndpoint, 140)
+		at, cleanup, cross, err := h.selectTunnel(t.Context(), h.controlHost, "no-such-tunnel", mapEndpoint, 140)
 		require.NoError(t, err)
 		t.Cleanup(cleanup)
 		assert.True(t, cross)
 		require.NotNil(t, at)
 		assert.Equal(t, uint16(140), gotVersion)
 	})
+
+	t.Run("fresh_dials_source_host", func(t *testing.T) {
+		cfg, err := defaultControlConfig()
+		require.NoError(t, err)
+		cfg.ControlHosts = []string{"ctrl1.test", "ctrl2.test"}
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+		h.controlHost = "ctrl1.test" // primary; the source names the other host
+
+		var gotHost string
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			gotHost = host
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+		at, cleanup, cross, err := h.selectTunnel(t.Context(), "ctrl2.test", "no-such-tunnel", mapEndpoint, ver)
+		require.NoError(t, err)
+		t.Cleanup(cleanup)
+		assert.True(t, cross)
+		require.NotNil(t, at)
+		assert.Equal(t, "ctrl2.test", at.controlHost)
+		assert.Equal(t, "ctrl2.test", gotHost)
+	})
+}
+
+func TestAuthorityHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		headers []wire.Header
+		want    string
+	}{
+		{"authority_parsed", []wire.Header{{Name: ":authority", Value: "CTRL2.test:8443"}}, "ctrl2.test"},
+		{"no_authority", []wire.Header{{Name: ":method", Value: "POST"}}, ""},
+		{"empty_headers", nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, authorityHost(tt.headers))
+		})
+	}
 }
 
 // writeSignerFiles writes a self-signed RSA cert and key to temp files.

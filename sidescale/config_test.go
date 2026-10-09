@@ -55,6 +55,20 @@ func TestLoadConfig(t *testing.T) {
 		assert.Equal(t, derp.ServerKeySubstitute, cfg.Derp.ServerKey)
 	})
 
+	t.Run("multi_host_control_list_parsed", func(t *testing.T) {
+		path := writeConfig(t, `{
+			"control": {"control_hosts": ["cp.example.com", "hs.example.com:8443"], "key_strategy": "borrow", "noise_keypair_path": "/tmp/k"}
+		}`)
+		cfg, err := LoadConfig(path)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"cp.example.com", "hs.example.com:8443"}, cfg.Control.ControlHosts)
+		reg := buildRegistration(cfg, testInstanceID)
+		// every entry is claimed, ports stripped from the claim host
+		require.Len(t, reg.Capabilities.UpgradeClaims, 2)
+		assert.Equal(t, "cp.example.com", reg.Capabilities.UpgradeClaims[0].HostPattern)
+		assert.Equal(t, "hs.example.com", reg.Capabilities.UpgradeClaims[1].HostPattern)
+	})
+
 	t.Run("control_validation_error", func(t *testing.T) {
 		path := writeConfig(t, `{"control": {"key_strategy": "bogus"}}`)
 		_, err := LoadConfig(path)

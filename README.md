@@ -89,7 +89,7 @@ A JSON file with a `control` section (always active) and an optional `derp` sect
 
 | Field | Description |
 |-------|-------------|
-| `control_hosts` | Host patterns to claim for `POST /ts2021` (default `controlplane.tailscale.com`). Add a `:port` when the `substitute` `/key` responder runs on a non-443 port |
+| `control_hosts` | Control hosts to claim for `POST /ts2021` (default `controlplane.tailscale.com`). Every entry is claimed, each with its own `/key` substitution and upstream dial, so one instance can intercept several coordinators. Add a `:port` when the `substitute` `/key` responder runs on a non-443 port |
 | `key_strategy` | `substitute` (default) serves the client a fresh responder key; `borrow` serves the real upstream key and requires `noise_keypair_path` |
 | `key_substitution` | Under `substitute`: `responder` (default) registers a canned `/key` response, or `sidecar_tls` terminates the `/key` TLS in the sidecar |
 | `noise_keypair_path` | Responder Noise private key. Required for `borrow`; optional for a persistent `substitute` key |

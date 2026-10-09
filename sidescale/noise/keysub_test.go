@@ -29,9 +29,10 @@ func TestSetupKeySubstitution(t *testing.T) {
 		hostCfg := sidecar.Config{NativeHTTPSend: fakeKeyResponse(realKey)}
 		h := testHandler(t, &cfg, newRecordingFlows(), core, stubRules{}, hostCfg)
 
-		ks, err := setupKeySubstitution(t.Context(), h)
+		subs, err := setupKeySubstitution(t.Context(), h)
 		require.NoError(t, err)
-		require.NotNil(t, ks)
+		ks, ok := subs[defaultControlHost]
+		require.True(t, ok)
 		label := "sidescale-keysub-" + defaultControlHost
 		assert.Equal(t, label, ks.responderID)
 
@@ -64,15 +65,108 @@ func TestSetupKeySubstitution(t *testing.T) {
 		assert.Equal(t, []string{"proxy_respond_delete", "proxy_respond_add"}, calls[1:])
 	})
 
+	t.Run("multi_host_substitutes_each", func(t *testing.T) {
+		cfg, err := defaultControlConfig()
+		require.NoError(t, err)
+		cfg.ControlHosts = []string{"ctrl1.test:8443", "ctrl2.test", "CTRL1.Test"}
+
+		key1, key2 := key.NewMachine().Public(), key.NewMachine().Public()
+		core := newFakeCore()
+		hostCfg := sidecar.Config{NativeHTTPSend: fakeKeyResponseByHost(map[string]key.MachinePublic{
+			"ctrl1.test": key1,
+			"ctrl2.test": key2,
+		})}
+		h := testHandler(t, &cfg, newRecordingFlows(), core, stubRules{}, hostCfg)
+
+		subs, err := setupKeySubstitution(t.Context(), h)
+		require.NoError(t, err)
+		h.keysub = subs // Setup's assignment; the harness skips Setup
+		// the ported and bare ctrl1 spellings share one entry
+		require.Len(t, subs, 2)
+
+		got1, err := subs["ctrl1.test"].realServerKey(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, key1, got1)
+		got2, err := subs["ctrl2.test"].realServerKey(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, key2, got2)
+
+		// lookup tolerates case and port forms arriving on the stream
+		same, err := h.keysubFor("CTRL1.Test:8443").realServerKey(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, key1, same)
+
+		// one responder per distinct host, labeled per host
+		adds := core.allParams("proxy_respond_add")
+		require.Len(t, adds, 2)
+		labels := map[string]string{}
+		for _, raw := range adds {
+			var args struct {
+				Host  string `json:"host"`
+				Label string `json:"label"`
+				Body  string `json:"body"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &args))
+			labels[args.Host] = args.Label
+			assert.Contains(t, args.Body, h.responderKey.Public().String())
+		}
+		assert.Equal(t, map[string]string{
+			"ctrl1.test": "sidescale-keysub-ctrl1.test",
+			"ctrl2.test": "sidescale-keysub-ctrl2.test",
+		}, labels)
+	})
+
+	t.Run("multi_host_fetch_failure_keeps_partial", func(t *testing.T) {
+		cfg, err := defaultControlConfig()
+		require.NoError(t, err)
+		cfg.ControlHosts = []string{"ok.test", "down.test"}
+
+		hostCfg := sidecar.Config{NativeHTTPSend: fakeKeyResponseByHost(map[string]key.MachinePublic{
+			"ok.test": key.NewMachine().Public(), // down.test has no key: fetch fails
+		})}
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, hostCfg)
+
+		// the partially built state is returned with the error, so Setup can install it
+		subs, err := setupKeySubstitution(t.Context(), h)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "down.test")
+		assert.Equal(t, map[string]*keySubstituter{"ok.test": subs["ok.test"]}, subs)
+	})
+
+	t.Run("multi_host_register_failure_keeps_responder", func(t *testing.T) {
+		cfg, err := defaultControlConfig()
+		require.NoError(t, err)
+		cfg.ControlHosts = []string{"a.test", "b.test"}
+		hostCfg := sidecar.Config{NativeHTTPSend: fakeKeyResponse(key.NewMachine().Public())}
+		core := &failAddCore{fakeCore: newFakeCore(), failHost: "b.test"}
+		h := testHandler(t, &cfg, newRecordingFlows(), core, stubRules{}, hostCfg)
+
+		// a.test's responder registered before b.test's add failed: Close must still
+		// deregister it via the returned partial map
+		subs, err := setupKeySubstitution(t.Context(), h)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "register /key responder")
+		require.Len(t, subs, 2)
+		assert.Equal(t, "sidescale-keysub-a.test", subs["a.test"].responderID)
+
+		subs["a.test"].close(t.Context())
+		var del struct {
+			ID string `json:"id"`
+		}
+		last := core.params("proxy_respond_delete")
+		require.NoError(t, json.Unmarshal(last, &del))
+		assert.Equal(t, "sidescale-keysub-a.test", del.ID)
+	})
+
 	t.Run("borrow_needs_no_substitution", func(t *testing.T) {
 		cfg, err := defaultControlConfig()
 		require.NoError(t, err)
 		cfg.KeyStrategy = KeyStrategyBorrow
 
 		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, sidecar.Config{})
-		ks, err := setupKeySubstitution(t.Context(), h)
+		subs, err := setupKeySubstitution(t.Context(), h)
 		require.NoError(t, err)
-		assert.Nil(t, ks)
+		assert.Nil(t, subs)
 	})
 
 	t.Run("close_deletes_by_stable_label", func(t *testing.T) {
@@ -86,9 +180,9 @@ func TestSetupKeySubstitution(t *testing.T) {
 
 		ks, err := setupKeySubstitution(t.Context(), h)
 		require.NoError(t, err)
-		require.NotNil(t, ks)
+		require.NotNil(t, ks[defaultControlHost])
 
-		ks.close(t.Context())
+		ks[defaultControlHost].close(t.Context())
 		var del struct {
 			ID string `json:"id"`
 		}
@@ -107,9 +201,9 @@ func TestSetupKeySubstitution(t *testing.T) {
 		h := testHandler(t, &cfg, newRecordingFlows(), core, stubRules{}, hostCfg)
 		ks, err := setupKeySubstitution(t.Context(), h)
 		require.NoError(t, err)
-		require.NotNil(t, ks)
+		require.NotNil(t, ks[defaultControlHost])
 
-		ks.close(t.Context())
+		ks[defaultControlHost].close(t.Context())
 		assert.NotContains(t, core.calls(), "proxy_respond_delete")
 	})
 }
@@ -124,9 +218,10 @@ func TestServeKey(t *testing.T) {
 	realKey := key.NewMachine().Public()
 	hostCfg := sidecar.Config{NativeHTTPSend: fakeKeyResponse(realKey)}
 	h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, hostCfg)
-	ks, err := setupKeySubstitution(t.Context(), h)
+	subs, err := setupKeySubstitution(t.Context(), h)
 	require.NoError(t, err)
-	require.NotNil(t, ks)
+	ks, ok := subs[defaultControlHost]
+	require.True(t, ok)
 
 	t.Run("serves_substituted_key", func(t *testing.T) {
 		client := newMemConn([]byte("GET /key?v=1 HTTP/1.1\r\nHost: controlplane.tailscale.com\r\n\r\n"))

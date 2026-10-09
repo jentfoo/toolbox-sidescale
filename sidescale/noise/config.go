@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/go-appsec/toolbox/pkg/addr"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/adapter"
 )
 
@@ -102,6 +103,11 @@ func (c *ControlConfig) Validate() error {
 		return errors.New("sidescale: key_strategy=borrow requires noise_keypair_path")
 	} else if c.KeyStrategy == KeyStrategySubstitute && !slices.Contains([]string{KeySubResponder, KeySubSidecarTLS}, c.KeySubstitution) {
 		return fmt.Errorf("sidescale: invalid key_substitution %q", c.KeySubstitution)
+	} else if slices.ContainsFunc(c.ControlHosts, func(h string) bool {
+		host, _ := addr.Parse(h, "https")
+		return host == ""
+	}) {
+		return errors.New("sidescale: control_hosts entries must name a host")
 	} else if !slices.Contains([]string{UpstreamSchemeAuto, UpstreamSchemeHTTPS, UpstreamSchemeHTTP}, c.UpstreamScheme) {
 		return fmt.Errorf("sidescale: invalid upstream_scheme %q", c.UpstreamScheme)
 	} else if !slices.Contains([]string{PoolModeShared, PoolModePerClient}, c.UpstreamPoolMode) {

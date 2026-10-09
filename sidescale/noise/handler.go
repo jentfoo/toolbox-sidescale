@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -36,10 +37,10 @@ type Handler struct {
 	conn         *sidecar.Conn
 	cfg          ControlConfig
 	name         string // adapter name, for tunnel envelope paths
-	controlHost  string // host part of cfg.ControlHosts[0]
+	controlHost  string // parsed cfg.ControlHosts[0]; origin for fresh replay/inject tunnels
 	responderKey key.MachinePrivate
 	machineKey   func(client string) (key.MachinePrivate, error)
-	keysub       *keySubstituter
+	keysub       map[string]*keySubstituter // per-host /key substitution, keyed by parsed host; nil under borrow
 
 	// dialFn opens one upstream Noise+HTTP/2 conn; injectable for tests
 	dialFn func(ctx context.Context, host string, machineKey key.MachinePrivate, version uint16) (*upstreamConn, error)
@@ -93,6 +94,8 @@ func (h *Handler) SetBindingKeys(reg *bindings.RegisterSigner, hw *ecdsa.Private
 
 // Setup arms the /key substitution (fetch + responder registration). Call once at
 // startup; it may run while the dispatcher already serves streams, which waitSetup gates.
+// On failure the partially built state is still installed so Close can deregister any
+// responders that registered before the error.
 func (h *Handler) Setup(ctx context.Context) error {
 	ks, err := setupKeySubstitution(ctx, h)
 	h.keysub = ks
@@ -116,12 +119,21 @@ func (h *Handler) waitSetup(ctx context.Context) error {
 	}
 }
 
-// Close tears down the /key substitution responder. It runs in the dispatcher's
+// Close tears down the /key substitution responders. It runs in the dispatcher's
 // OnClose cleanup window, while the peer still accepts RPCs.
 func (h *Handler) Close(ctx context.Context) {
-	if h.keysub != nil {
-		h.keysub.close(ctx)
+	for _, ks := range h.keysub {
+		ks.close(ctx)
 	}
+}
+
+// isControlHost reports whether host (any case or port form) is a configured control host.
+func (h *Handler) isControlHost(host string) bool {
+	parsed, _ := addr.Parse(host, "https")
+	return slices.ContainsFunc(h.cfg.ControlHosts, func(ch string) bool {
+		chHost, _ := addr.Parse(ch, "https")
+		return chHost == parsed
+	})
 }
 
 // ServeStream drives an accepted stream: a ts2021 tunnel, or a cleartext /key request
@@ -148,7 +160,13 @@ func (h *Handler) ServeStream(ctx context.Context, sc *sidecar.StreamConn) {
 			_ = sc.Close()
 			return
 		}
-		h.keysub.serveKey(ctx, sc, p.StreamID)
+		ks := h.keysubFor(p.Host)
+		if ks == nil {
+			h.tunnelError(p.StreamID, "serve /key", fmt.Errorf("no substitution state for host %q", p.Host))
+			_ = sc.Close()
+			return
+		}
+		ks.serveKey(ctx, sc, p.StreamID)
 	default:
 		_ = sc.Close()
 	}

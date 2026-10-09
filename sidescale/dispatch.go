@@ -30,17 +30,20 @@ type streamSurface interface {
 type dispatcher struct {
 	*sidecar.StreamRouter
 
-	conn        *sidecar.Conn
-	cfg         Config
-	noise       *noise.Handler
-	derp        *derp.Handler // nil when control-only
-	controlHost string
-	derpHosts   map[string]struct{} // lowercased host parts of cfg.Derp.DerpHosts
+	conn         *sidecar.Conn
+	cfg          Config
+	noise        *noise.Handler
+	derp         *derp.Handler       // nil when control-only
+	controlHosts map[string]struct{} // lowercased host parts of cfg.Control.ControlHosts
+	derpHosts    map[string]struct{} // lowercased host parts of cfg.Derp.DerpHosts
 }
 
 func newDispatcher(conn *sidecar.Conn, router *sidecar.StreamRouter, cfg Config, nh *noise.Handler, dh *derp.Handler) *dispatcher {
 	// addr.Parse lowercases host so comparisons are case-insensitive
-	controlHost, _ := addr.Parse(cfg.Control.ControlHosts[0], "https")
+	controlHosts := bulk.SliceToSetBy(func(h string) string {
+		host, _ := addr.Parse(h, "https")
+		return host
+	}, cfg.Control.ControlHosts)
 	var derpHosts map[string]struct{}
 	if cfg.Derp != nil {
 		derpHosts = bulk.SliceToSetBy(func(h string) string {
@@ -54,7 +57,7 @@ func newDispatcher(conn *sidecar.Conn, router *sidecar.StreamRouter, cfg Config,
 		cfg:          cfg,
 		noise:        nh,
 		derp:         dh,
-		controlHost:  controlHost,
+		controlHosts: controlHosts,
 		derpHosts:    derpHosts,
 	}
 }
@@ -91,9 +94,10 @@ func (d *dispatcher) routeOpen(p wire.StreamOpenParams) streamSurface {
 			}
 		}
 		if d.cfg.Control.KeyStrategy == noise.KeyStrategySubstitute &&
-			d.cfg.Control.KeySubstitution == noise.KeySubSidecarTLS &&
-			host == d.controlHost {
-			return d.noise
+			d.cfg.Control.KeySubstitution == noise.KeySubSidecarTLS {
+			if _, ok := d.controlHosts[host]; ok {
+				return d.noise
+			}
 		}
 	}
 	return nil

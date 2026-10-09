@@ -23,6 +23,7 @@ var injectionTargetSchema = json.RawMessage(`{
     "stream": {"type": "boolean", "default": false},
     "as_machine": {"type": "string", "description": "override the machine identity for this injection"},
     "as_version": {"type": "integer", "description": "override the cleartext handshake capability version for a fresh tunnel (independent of the body Version), to exercise the server version floor"},
+    "control_host": {"type": "string", "description": "configured control host a fresh tunnel dials (default: first control_hosts entry)"},
     "reuse_tunnel": {"type": "boolean", "default": false, "description": "ride the live tunnel named by tunnel_id instead of a fresh one; WARNING: disturbs that client's map session"},
     "mutations": {"type": "array", "description": "mutation ops applied to the request before sending"}
   }
@@ -33,24 +34,34 @@ const injectToolDescription = "Originate a Tailscale control-plane request (regi
 // buildRegistration builds the register handshake payload for cfg. instanceID must be
 // a stable UUID so reconnect reattaches ownership.
 func buildRegistration(cfg Config, instanceID string) sidecar.Registration {
-	host, clientPort := addr.Parse(cfg.Control.ControlHosts[0], "https")
-	caps := wire.Capabilities{
-		UpgradeClaims: []wire.UpgradeClaim{{
+	caps := wire.Capabilities{InjectionTargets: []wire.InjectionTarget{{TargetSchema: injectionTargetSchema}}}
+	// claims dedupe by parsed host: duplicate case/port spellings of one host must not
+	// compile overlapping upgrade or early claims; empty hosts are rejected by Validate
+	seen := map[string]struct{}{}
+	for _, ch := range cfg.Control.ControlHosts {
+		host, clientPort := addr.Parse(ch, "https")
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		caps.UpgradeClaims = append(caps.UpgradeClaims, wire.UpgradeClaim{
 			HostPattern:   host,
 			PathPattern:   "/ts2021",
 			UpgradeSignal: "http_101",
 			MethodSet:     []string{"POST"},
-		}},
-		InjectionTargets: []wire.InjectionTarget{{TargetSchema: injectionTargetSchema}},
-	}
-	// sidecar_tls serves /key in the byte path: claim the host-terminated control
-	// TLS connection so cleartext /key requests reach serveKey
-	if cfg.Control.KeyStrategy == noise.KeyStrategySubstitute && cfg.Control.KeySubstitution == noise.KeySubSidecarTLS {
-		caps.EarlyClaims = append(caps.EarlyClaims, wire.EarlyClaim{
-			PortRange: wire.PortRange{Low: clientPort, High: clientPort},
-			HostMatch: host,
-			TLS:       &wire.TLSClaim{Terminate: true, SNIMatch: host},
 		})
+		// sidecar_tls serves /key in the byte path: claim the host-terminated control
+		// TLS connection so cleartext /key requests reach serveKey
+		if cfg.Control.KeyStrategy == noise.KeyStrategySubstitute && cfg.Control.KeySubstitution == noise.KeySubSidecarTLS {
+			caps.EarlyClaims = append(caps.EarlyClaims, wire.EarlyClaim{
+				PortRange: wire.PortRange{Low: clientPort, High: clientPort},
+				HostMatch: host,
+				TLS:       &wire.TLSClaim{Terminate: true, SNIMatch: host},
+			})
+		}
 	}
 
 	protocols := noise.Protocols()

@@ -185,6 +185,45 @@ func TestOnInvokeTool(t *testing.T) {
 		}, 2*time.Second, 10*time.Millisecond)
 	})
 
+	// control_host dials a non-primary configured host; unconfigured values are rejected
+	t.Run("control_host_dials_configured", func(t *testing.T) {
+		cfg, err := defaultControlConfig()
+		require.NoError(t, err)
+		cfg.ControlHosts = []string{"ctrl1.test", "ctrl2.test"}
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+		h.controlHost = "ctrl1.test"
+
+		var gotHost string
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			gotHost = host
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+
+		args := json.RawMessage(`{"endpoint":"/machine/register","control_host":"ctrl2.test","body":{}}`)
+		res, err := h.OnInvokeTool(wire.InvokeToolParams{Name: InjectToolName, Arguments: args})
+		require.NoError(t, err)
+		require.False(t, res.IsError)
+		assert.Equal(t, "ctrl2.test", gotHost)
+
+		var result struct {
+			Summary string `json:"summary"`
+		}
+		require.NoError(t, json.Unmarshal(res.Result, &result))
+		assert.Contains(t, result.Summary, "ctrl2.test")
+	})
+
+	t.Run("control_host_unconfigured_rejected", func(t *testing.T) {
+		cfg, err := defaultControlConfig()
+		require.NoError(t, err)
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+
+		args := json.RawMessage(`{"endpoint":"/machine/register","control_host":"elsewhere.test","body":{}}`)
+		res, err := h.OnInvokeTool(wire.InvokeToolParams{Name: InjectToolName, Arguments: args})
+		require.NoError(t, err)
+		require.True(t, res.IsError)
+		assert.Contains(t, string(res.Result), "not a configured control host")
+	})
+
 	// as_version overrides the cleartext handshake capability version for a fresh tunnel
 	// independently of the body Version, so a tester can drive the server's version floor
 	t.Run("as_version_overrides_handshake", func(t *testing.T) {
