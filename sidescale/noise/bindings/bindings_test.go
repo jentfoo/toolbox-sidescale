@@ -26,6 +26,7 @@ func TestResignRegisterRequest(t *testing.T) {
 	machinePub := key.NewMachine().Public()
 	const serverURL = "https://control.example.com"
 	ts := time.Unix(1_700_000_000, 0).UTC()
+	now := time.Unix(1_700_500_000, 123).UTC()
 
 	body, err := json.Marshal(&tailcfg.RegisterRequest{Timestamp: &ts})
 	require.NoError(t, err)
@@ -35,7 +36,7 @@ func TestResignRegisterRequest(t *testing.T) {
 		require.NoError(t, err)
 		signer := &RegisterSigner{Key: rsaKey, CertChain: [][]byte{[]byte("der-a"), []byte("der-b")}}
 
-		res, err := ResignRegisterRequest(body, serverURL, serverPub, machinePub, signer)
+		res, err := ResignRegisterRequest(body, now, serverURL, serverPub, machinePub, signer)
 		require.NoError(t, err)
 		assert.Nil(t, res.Annotations)
 
@@ -43,6 +44,9 @@ func TestResignRegisterRequest(t *testing.T) {
 		require.NoError(t, json.Unmarshal(res.Body, &out))
 		assert.Equal(t, tailcfg.SignatureV2, out.SignatureType)
 		assert.Equal(t, []byte("der-ader-b"), out.DeviceCert)
+		// captured timestamp preserved, not replaced by now
+		require.NotNil(t, out.Timestamp)
+		assert.Equal(t, ts, out.Timestamp.UTC())
 
 		digest := hashRegisterV2(ts, serverURL, out.DeviceCert, serverPub, machinePub)
 		verr := rsa.VerifyPSS(&rsaKey.PublicKey, crypto.SHA256, digest, out.Signature, &rsa.PSSOptions{
@@ -52,12 +56,39 @@ func TestResignRegisterRequest(t *testing.T) {
 		assert.NoError(t, verr)
 	})
 
+	t.Run("stamps_missing_timestamp", func(t *testing.T) {
+		rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+		require.NoError(t, err)
+		signer := &RegisterSigner{Key: rsaKey, CertChain: [][]byte{[]byte("der")}}
+		// unsigned capture: never device-cert signed, so no timestamp to bind over
+		unsigned, err := json.Marshal(&tailcfg.RegisterRequest{Version: 110})
+		require.NoError(t, err)
+
+		res, err := ResignRegisterRequest(unsigned, now, serverURL, serverPub, machinePub, signer)
+		require.NoError(t, err)
+		assert.Nil(t, res.Annotations)
+
+		var out tailcfg.RegisterRequest
+		require.NoError(t, json.Unmarshal(res.Body, &out))
+		require.NotNil(t, out.Timestamp)
+		assert.Equal(t, now.Round(time.Second), out.Timestamp.UTC())
+		assert.Equal(t, tailcfg.SignatureV2, out.SignatureType)
+
+		// server-side view: the emitted body's timestamp must recompute the signed hash
+		digest := hashRegisterV2(*out.Timestamp, serverURL, out.DeviceCert, serverPub, machinePub)
+		verr := rsa.VerifyPSS(&rsaKey.PublicKey, crypto.SHA256, digest, out.Signature, &rsa.PSSOptions{
+			SaltLength: rsa.PSSSaltLengthEqualsHash,
+			Hash:       crypto.SHA256,
+		})
+		assert.NoError(t, verr)
+	})
+
 	t.Run("strips_without_key", func(t *testing.T) {
-		signed, err := ResignRegisterRequest(body, serverURL, serverPub, machinePub,
+		signed, err := ResignRegisterRequest(body, now, serverURL, serverPub, machinePub,
 			&RegisterSigner{Key: mustRSA(t), CertChain: [][]byte{[]byte("der")}})
 		require.NoError(t, err)
 
-		res, err := ResignRegisterRequest(signed.Body, serverURL, serverPub, machinePub, nil)
+		res, err := ResignRegisterRequest(signed.Body, now, serverURL, serverPub, machinePub, nil)
 		require.NoError(t, err)
 		assert.Equal(t, bindingRegisterSignature, res.Annotations[AnnBinding])
 		assert.Equal(t, reasonNoCert, res.Annotations[AnnReason])
@@ -71,7 +102,7 @@ func TestResignRegisterRequest(t *testing.T) {
 	})
 
 	t.Run("stock_no_signature_noop", func(t *testing.T) {
-		res, err := ResignRegisterRequest(body, serverURL, serverPub, machinePub, nil)
+		res, err := ResignRegisterRequest(body, now, serverURL, serverPub, machinePub, nil)
 		require.NoError(t, err)
 		assert.Nil(t, res.Annotations)
 

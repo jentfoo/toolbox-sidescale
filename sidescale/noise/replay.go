@@ -203,7 +203,7 @@ func (h *Handler) rebind(endpoint string, req *wire.FlowMessage, at *activeTunne
 			}
 		}
 		if crossTunnel || mutationTouches(muts, "Timestamp", "DeviceCert", "Signature", "SignatureType") {
-			res, err := bindings.ResignRegisterRequest(req.Body, "https://"+at.controlHost, at.serverLegacy, at.machineKey.Public(), h.regSigner)
+			res, err := bindings.ResignRegisterRequest(req.Body, time.Now(), "https://"+at.controlHost, at.serverLegacy, at.machineKey.Public(), h.regSigner)
 			if err != nil {
 				return nil, false, err
 			}

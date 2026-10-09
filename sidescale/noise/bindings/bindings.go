@@ -53,10 +53,11 @@ type RegisterSigner struct {
 }
 
 // ResignRegisterRequest rebinds the RegisterRequest SignatureV2 over serverLegacyPub
-// (the server legacy machine key the hash binds, not the Noise key) and machinePub.
+// (the server legacy machine key the hash binds, not the Noise key) and machinePub,
+// signing at the captured Timestamp or, when the capture carries none, at now.
 // With signer set it re-signs; with signer nil it strips Signature, SignatureType, and
 // DeviceCert and annotates the removal. It does not cover NodeKey.
-func ResignRegisterRequest(body []byte, serverURL string, serverLegacyPub, machinePub key.MachinePublic, signer *RegisterSigner) (Result, error) {
+func ResignRegisterRequest(body []byte, now time.Time, serverURL string, serverLegacyPub, machinePub key.MachinePublic, signer *RegisterSigner) (Result, error) {
 	var req tailcfg.RegisterRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		return Result{}, fmt.Errorf("bindings: register unmarshal: %w", err)
@@ -81,11 +82,14 @@ func ResignRegisterRequest(body []byte, serverURL string, serverLegacyPub, machi
 
 	req.SignatureType = tailcfg.SignatureV2
 	req.DeviceCert = slices.Concat(signer.CertChain...)
-	var reqTime time.Time
-	if req.Timestamp != nil {
-		reqTime = *req.Timestamp
+	// stamp a whole-second now for a capture without one, like a real signing client
+	// (which refuses to sign one at all): the zero time hashes fine, but the emitted
+	// body carries no timestamp the server could rehash to match
+	if req.Timestamp == nil {
+		ts := now.UTC().Round(time.Second)
+		req.Timestamp = &ts
 	}
-	digest := hashRegisterV2(reqTime, serverURL, req.DeviceCert, serverLegacyPub, machinePub)
+	digest := hashRegisterV2(*req.Timestamp, serverURL, req.DeviceCert, serverLegacyPub, machinePub)
 	sig, err := rsa.SignPSS(rand.Reader, signer.Key, crypto.SHA256, digest, &rsa.PSSOptions{
 		SaltLength: rsa.PSSSaltLengthEqualsHash,
 		Hash:       crypto.SHA256,

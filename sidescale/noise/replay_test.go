@@ -144,6 +144,7 @@ func TestRebind(t *testing.T) {
 		signer, _, err := LoadBindingKeys(&cfg)
 		require.NoError(t, err)
 		h := &Handler{cfg: cfg, regSigner: signer}
+		// unsigned capture: carries no Timestamp for the resign to bind over
 		req := &wire.FlowMessage{Path: registerEndpoint, Body: []byte(`{}`)}
 		ann, resign, err := h.rebind(registerEndpoint, req, newTunnel(t), true, nil)
 		require.NoError(t, err)
@@ -154,6 +155,10 @@ func TestRebind(t *testing.T) {
 		require.NoError(t, json.Unmarshal(req.Body, &rr))
 		assert.Equal(t, tailcfg.SignatureV2, rr.SignatureType)
 		assert.NotEmpty(t, rr.Signature)
+		// no timestamp in the capture: one is stamped, so the emitted body and
+		// the signed hash agree server-side
+		require.NotNil(t, rr.Timestamp)
+		assert.False(t, rr.Timestamp.IsZero())
 	})
 
 	t.Run("map_nodekey_no_hwkey_strips", func(t *testing.T) {
