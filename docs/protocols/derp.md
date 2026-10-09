@@ -268,7 +268,7 @@ Clients are keyed by public key. Multiple simultaneous connections with the same
 * `lastWriterIsActive` (default) — the newest connection is active on register, and thereafter the active client follows the last connection to write.
 * `disableFighters` — the newest connection is active and writes do not move it, but if the set's connections interleave sends (a sign of a cloned key), every member is disabled and the set has no active client, dropping packets to it until it collapses back to a single connection.
 
-Removing a member never emits `FramePeerGone`. When the active connection leaves a set with two or more members, the set has no active client (packets to it drop) until another member writes; only a collapse back to a single connection re-enables a disabled member and makes it active. Peer-gone fires only when the last connection for a key departs, so an old connection tearing down after a replacement has taken over is a no-op.
+Removing a member never emits `FramePeerGone`. When the active connection leaves a set with two or more members, the server promotes the most recently active surviving member, so a key with live enabled connections keeps receiving (send activity is tracked under both policies). A disabled member never receives. A set whose remaining members are all disabled has no active client, so packets to it drop until it collapses back to a single connection, which re-enables that member and makes it active. Peer-gone fires only when the last connection for a key departs, so an old connection tearing down after a replacement has taken over is a no-op.
 
 ### 7.2 Per-client send queues and drop policy
 

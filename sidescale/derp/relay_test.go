@@ -227,6 +227,33 @@ func TestSyntheticRelayRoute(t *testing.T) {
 		assert.True(t, hasFrame(rc1, derpproto.FrameRecvPacket))
 	})
 
+	t.Run("active_drop_promotes_recent_sender", func(t *testing.T) {
+		h := terminateHandler(t, DupPolicyLastWriter)
+		rc1, c1 := joinClient(h, kPub, "tun1")
+		rc2, _ := joinClient(h, kPub, "tun2")
+		_, c3 := joinClient(h, kPub, "tun3") // active, never sends
+		_, sender := joinClient(h, sPub, "tunS")
+
+		routePacket(t.Context(), h, c1, unknown, "x") // c1 is the last sender
+		h.relay.remove(t.Context(), c3)               // departing active, three survivors
+		routePacket(t.Context(), h, sender, kPub, "hi")
+		assert.True(t, hasFrame(rc1, derpproto.FrameRecvPacket))
+		assert.False(t, hasFrame(rc2, derpproto.FrameRecvPacket))
+	})
+
+	t.Run("active_drop_silent_set_promotes_newest", func(t *testing.T) {
+		h := terminateHandler(t, DupPolicyLastWriter)
+		rc1, _ := joinClient(h, kPub, "tun1")
+		rc2, _ := joinClient(h, kPub, "tun2")
+		_, c3 := joinClient(h, kPub, "tun3") // active
+		_, sender := joinClient(h, sPub, "tunS")
+
+		h.relay.remove(t.Context(), c3) // nobody ever sent, fall back to connect order
+		routePacket(t.Context(), h, sender, kPub, "hi")
+		assert.True(t, hasFrame(rc2, derpproto.FrameRecvPacket))
+		assert.False(t, hasFrame(rc1, derpproto.FrameRecvPacket))
+	})
+
 	t.Run("old_conn_teardown_no_spurious_gone", func(t *testing.T) {
 		h := terminateHandler(t, DupPolicyLastWriter)
 		_, c1 := joinClient(h, kPub, "tun1")
@@ -303,6 +330,40 @@ func TestSyntheticRelayRoute(t *testing.T) {
 		assert.True(t, hasFrame(rc1, derpproto.FrameRecvPacket))
 	})
 
+	t.Run("disable_fighters_active_drop_promotes", func(t *testing.T) {
+		h := terminateHandler(t, DupPolicyDisableFighters)
+		rc1, c1 := joinClient(h, kPub, "tun1")
+		rc2, _ := joinClient(h, kPub, "tun2")
+		_, c3 := joinClient(h, kPub, "tun3") // active
+		_, sender := joinClient(h, sPub, "tunS")
+
+		routePacket(t.Context(), h, c1, unknown, "x") // c1 is the last sender
+		h.relay.remove(t.Context(), c3)
+		routePacket(t.Context(), h, sender, kPub, "hi")
+		assert.True(t, hasFrame(rc1, derpproto.FrameRecvPacket))
+		assert.False(t, hasFrame(rc2, derpproto.FrameRecvPacket))
+	})
+
+	t.Run("disable_fighters_promotion_skips_disabled", func(t *testing.T) {
+		h := terminateHandler(t, DupPolicyDisableFighters)
+		rc1, c1 := joinClient(h, kPub, "tun1")
+		rc2, c2 := joinClient(h, kPub, "tun2")
+		_, c3 := joinClient(h, kPub, "tun3")
+		_, sender := joinClient(h, sPub, "tunS")
+
+		// c3 sends twice without a fight, then c1 repeats after c2: all three disabled
+		routePacket(t.Context(), h, c3, unknown, "a")
+		routePacket(t.Context(), h, c3, unknown, "b")
+		routePacket(t.Context(), h, c1, unknown, "c")
+		routePacket(t.Context(), h, c2, unknown, "d")
+		routePacket(t.Context(), h, c1, unknown, "e")
+
+		h.relay.remove(t.Context(), c3) // departing active, survivors all disabled
+		routePacket(t.Context(), h, sender, kPub, "hi")
+		assert.False(t, hasFrame(rc1, derpproto.FrameRecvPacket))
+		assert.False(t, hasFrame(rc2, derpproto.FrameRecvPacket)) // set stays disabled, stays dark
+	})
+
 	t.Run("disable_fighters_disco_dropped_silently", func(t *testing.T) {
 		h := terminateHandler(t, DupPolicyDisableFighters)
 		_, c1 := joinClient(h, kPub, "tun1")
@@ -376,6 +437,23 @@ func TestSyntheticRelaySendHistory(t *testing.T) {
 		assert.Same(t, c1, hist[1])
 		assert.True(t, c1.disabled) // fight detection unaffected by the dedupe
 		assert.True(t, c2.disabled)
+	})
+
+	t.Run("recorded_under_last_writer", func(t *testing.T) {
+		h := terminateHandler(t, DupPolicyLastWriter)
+		_, c1 := joinClient(h, kPub, "tun1")
+		_, c2 := joinClient(h, kPub, "tun2")
+		joinClient(h, kPub, "tun3") // silent
+
+		routePacket(t.Context(), h, c2, unknown, "a")
+		routePacket(t.Context(), h, c1, unknown, "b")
+		routePacket(t.Context(), h, c1, unknown, "c") // repeat, moved not duplicated
+
+		conns, hist := dupSetSnapshot(t, h, kPub)
+		assert.Equal(t, 3, conns)
+		require.Len(t, hist, 2) // only senders recorded
+		assert.Same(t, c2, hist[0])
+		assert.Same(t, c1, hist[1])
 	})
 
 	t.Run("churn_bounded_by_live_conns", func(t *testing.T) {

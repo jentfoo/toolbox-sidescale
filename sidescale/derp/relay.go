@@ -184,11 +184,11 @@ type relayClient struct {
 // clientSet holds every live connection sharing one node key and the active receive target.
 type clientSet struct {
 	active *relayClient   // RecvPacket target; nil while a fighting set is disabled
-	last   *relayClient   // most recent sender, drives active selection
+	last   *relayClient   // most recent sender or promoted survivor, drives active selection
 	conns  []*relayClient // live connections, connect order (most recent last)
-	// sendHistory records senders least to most recent for disable_fighters detection.
-	// Each conn appears at most once: repeats move it to the end and removals trim it,
-	// keeping the slice bounded by len(conns).
+	// sendHistory records senders least to most recent for disable_fighters detection
+	// and survivor promotion. Each conn appears at most once: repeats move it to the
+	// end and removals trim it, keeping the slice bounded by len(conns).
 	sendHistory []*relayClient
 }
 
@@ -259,6 +259,11 @@ func (r *syntheticRelay) remove(ctx context.Context, c *relayClient) {
 			s.disabled = false
 			cs.active, cs.last, cs.sendHistory = s, s, nil
 		default:
+			if cs.last == nil {
+				// departing conn was the set's last: promote so the key keeps receiving
+				// instead of dropping packets until a survivor writes
+				cs.last = cs.promoteSurvivor()
+			}
 			// active follows the last writer while enabled, else the set stays inactive
 			cs.active = nil
 			if cs.last != nil && !cs.last.disabled {
@@ -270,6 +275,23 @@ func (r *syntheticRelay) remove(ctx context.Context, c *relayClient) {
 	if gone {
 		r.announceGone(ctx, c.clientKey)
 	}
+}
+
+// promoteSurvivor returns the set's newest enabled connection: the most recent sender
+// when one is recorded, else the newest connection. Disabled conns never receive.
+// Caller holds r.mu.
+func (cs *clientSet) promoteSurvivor() *relayClient {
+	for i := len(cs.sendHistory) - 1; i >= 0; i-- {
+		if c := cs.sendHistory[i]; !c.disabled {
+			return c
+		}
+	}
+	for i := len(cs.conns) - 1; i >= 0; i-- {
+		if c := cs.conns[i]; !c.disabled {
+			return c
+		}
+	}
+	return nil
 }
 
 // route delivers src's SendPacket to the addressed peer as RecvPacket, capturing the
@@ -305,8 +327,9 @@ func (r *syntheticRelay) route(ctx context.Context, src *relayClient, payload []
 	r.h.emitAndWrite(ctx, peer.tunnelFlowID, peer.fr, derpproto.FrameRecvPacket, recv)
 }
 
-// noteActivity updates the active receiver for src's dup set and, under disable_fighters,
-// disables the whole set when its connections interleave sends. Caller holds r.mu.
+// noteActivity records src as its dup set's most recent sender, updates the active
+// receiver, and under disable_fighters disables the whole set when its connections
+// interleave sends. Caller holds r.mu.
 func (r *syntheticRelay) noteActivity(src *relayClient) {
 	cs := r.byKey[src.clientKey]
 	if cs == nil || len(cs.conns) < 2 || src.disabled {
@@ -314,9 +337,7 @@ func (r *syntheticRelay) noteActivity(src *relayClient) {
 	}
 	if !r.disableFighters {
 		cs.last, cs.active = src, src // last writer receives
-		return
-	}
-	if cs.last == nil {
+	} else if cs.last == nil {
 		cs.last, cs.active = src, src // first speaker receives
 	}
 	if len(cs.sendHistory) > 0 && cs.sendHistory[len(cs.sendHistory)-1] == src {
@@ -324,11 +345,13 @@ func (r *syntheticRelay) noteActivity(src *relayClient) {
 	}
 	// record src as the most recent sender, deduped move-to-end so each conn appears
 	// at most once and the slice stays bounded by len(cs.conns)
-	if i := slices.Index(cs.sendHistory, src); i >= 0 { // interleaved senders => fighting
-		for _, x := range cs.conns {
-			x.disabled = true
+	if i := slices.Index(cs.sendHistory, src); i >= 0 {
+		if r.disableFighters { // interleaved senders => fighting
+			for _, x := range cs.conns {
+				x.disabled = true
+			}
+			cs.active = nil
 		}
-		cs.active = nil
 		cs.sendHistory = slices.Delete(cs.sendHistory, i, i+1)
 	}
 	cs.sendHistory = append(cs.sendHistory, src)
