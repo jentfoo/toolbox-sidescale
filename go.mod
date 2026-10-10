@@ -8,7 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
-	tailscale.com v1.104.0
+	tailscale.com v1.104.1
 )
 
 require (
