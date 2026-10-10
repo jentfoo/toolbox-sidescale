@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/jentfoo/toolbox-sidescale/sidescale/derp"
@@ -32,8 +35,16 @@ func LoadConfig(path string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("sidescale: read config %s: %w", path, err)
 		}
-		if err := json.Unmarshal(data, &cfg); err != nil {
+		// strict decode: a typo'd key must fail startup, not fall back to its default
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&cfg); err != nil {
 			return Config{}, fmt.Errorf("sidescale: parse config %s: %w", path, err)
+		}
+		var extra json.RawMessage
+		// Decode stops at the first value; anything after it is a second (ignored) document
+		if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+			return Config{}, fmt.Errorf("sidescale: parse config %s: unexpected content after JSON object", path)
 		}
 	}
 	cfg.applyDefaults()

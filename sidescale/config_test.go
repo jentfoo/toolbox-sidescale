@@ -80,4 +80,56 @@ func TestLoadConfig(t *testing.T) {
 		_, err := LoadConfig(path)
 		assert.ErrorContains(t, err, "derp requires derp_hosts")
 	})
+
+	t.Run("unknown_field_rejected", func(t *testing.T) {
+		path := writeConfig(t, `{"control": {"key_stategy": "borrow"}}`)
+		_, err := LoadConfig(path)
+		assert.ErrorContains(t, err, `unknown field "key_stategy"`)
+	})
+
+	t.Run("trailing_content_rejected", func(t *testing.T) {
+		path := writeConfig(t, `{"name": "sc"} {"name": "other"}`)
+		_, err := LoadConfig(path)
+		assert.ErrorContains(t, err, "unexpected content after JSON object")
+	})
+
+	// guards the strict decode: a documented key missing (or misspelled) on the
+	// structs would make every config using it fail startup
+	t.Run("all_fields_accepted", func(t *testing.T) {
+		path := writeConfig(t, `{
+			"name": "sc",
+			"sectool": {"socket": "/tmp/sectool.sock"},
+			"control": {
+				"control_hosts": ["cp.example.com"],
+				"upstream_overrides": {"cp.example.com": "localhost:8080"},
+				"key_strategy": "substitute",
+				"key_substitution": "responder",
+				"noise_keypair_path": "/tmp/noise.key",
+				"device_cert_path": "/tmp/device.crt",
+				"device_key_path": "/tmp/device.key",
+				"hw_key_path": "/tmp/hw.key",
+				"machine_identity": "per_client",
+				"upstream_scheme": "auto",
+				"upstream_pool_mode": "shared",
+				"early_noise": "forward"
+			},
+			"derp": {
+				"derp_hosts": ["d.example.com"],
+				"upstream_overrides": {"d.example.com": "localhost:3478"},
+				"server_key": "substitute",
+				"server_keypair_path": "/tmp/derp.key",
+				"node_identity": "per_client",
+				"relay_mode": "relay",
+				"dup_policy": "last_writer",
+				"mesh_key": "mesh-secret",
+				"cert_name_sans": ["d.example.com"]
+			}
+		}`)
+		cfg, err := LoadConfig(path)
+		require.NoError(t, err)
+
+		assert.Equal(t, noise.KeyStrategySubstitute, cfg.Control.KeyStrategy)
+		require.NotNil(t, cfg.Derp)
+		assert.Equal(t, derp.RelayModeRelay, cfg.Derp.RelayMode)
+	})
 }
