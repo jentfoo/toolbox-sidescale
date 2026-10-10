@@ -208,6 +208,80 @@ func TestOnSidecarSendReplay(t *testing.T) {
 		assert.Equal(t, payload, frames[0].payload)
 	})
 
+	t.Run("legacy_peer_gone_verbatim", func(t *testing.T) {
+		flows := newRecordingFlows()
+		h := testHandler(t, relayConfig(), flows, stubRules{})
+		clientRC, _, _ := registerRelayTunnel(h, "tun", false)
+		payload := key.NewNode().Public().AppendTo(nil) // 32-byte key only, no reason byte
+
+		// a captured short PEER_GONE carries no typed headers, only the preserved payload
+		src := &wire.Flow{
+			Direction:    adapter.DirServerToClient,
+			ParentFlowID: "tun",
+			Response: &wire.FlowMessage{
+				Method:  "PEER_GONE",
+				Headers: []wire.Header{{Name: "X-Derp-Raw-Payload", Value: base64.StdEncoding.EncodeToString(payload)}},
+			},
+		}
+		_, err := h.OnSidecarSend(wire.SidecarSendParams{Flow: src})
+		require.NoError(t, err)
+
+		frames := clientRC.frames()
+		require.Len(t, frames, 1)
+		assert.Equal(t, derpproto.FramePeerGone, frames[0].typ)
+		assert.Equal(t, payload, frames[0].payload)
+	})
+
+	t.Run("short_packet_verbatim", func(t *testing.T) {
+		flows := newRecordingFlows()
+		h := testHandler(t, relayConfig(), flows, stubRules{})
+		_, upstreamRC, _ := registerRelayTunnel(h, "tun", false)
+		payload := []byte("sub-key-len")
+
+		// no decodable key prefix on the capture: replay must not fabricate a zero key
+		src := &wire.Flow{
+			Direction:    adapter.DirClientToServer,
+			ParentFlowID: "tun",
+			Request: &wire.FlowMessage{
+				Method:    "SEND_PACKET",
+				BodyRaw:   payload,
+				BodyCodec: packetCodec,
+			},
+		}
+		_, err := h.OnSidecarSend(wire.SidecarSendParams{Flow: src})
+		require.NoError(t, err)
+
+		frames := upstreamRC.frames()
+		require.Len(t, frames, 1)
+		assert.Equal(t, payload, frames[0].payload)
+	})
+
+	t.Run("legacy_peer_gone_header_edit_rebuilds", func(t *testing.T) {
+		flows := newRecordingFlows()
+		h := testHandler(t, relayConfig(), flows, stubRules{})
+		clientRC, _, _ := registerRelayTunnel(h, "tun", false)
+		peer := key.NewNode().Public()
+
+		src := &wire.Flow{
+			Direction:    adapter.DirServerToClient,
+			ParentFlowID: "tun",
+			Response: &wire.FlowMessage{
+				Method:  "PEER_GONE",
+				Headers: []wire.Header{{Name: "X-Derp-Raw-Payload", Value: base64.StdEncoding.EncodeToString(peer.AppendTo(nil))}},
+			},
+		}
+		muts := []wire.Mutation{
+			{Op: "set_header", Name: "X-Derp-Peer-Key", Value: peer.String()},
+			{Op: "set_header", Name: "X-Derp-Peer-Gone-Reason", Value: "2"},
+		}
+		_, err := h.OnSidecarSend(wire.SidecarSendParams{Flow: src, Mutations: muts})
+		require.NoError(t, err)
+
+		frames := clientRC.frames()
+		require.Len(t, frames, 1)
+		assert.Equal(t, append(peer.AppendTo(nil), 0x02), frames[0].payload)
+	})
+
 	t.Run("torn_down_rejects", func(t *testing.T) {
 		h := testHandler(t, relayConfig(), newRecordingFlows(), stubRules{})
 		src := &wire.Flow{

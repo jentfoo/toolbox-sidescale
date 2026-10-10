@@ -157,6 +157,9 @@ func decodeFrame(t derpproto.FrameType, payload []byte) frameFields {
 				{Name: "X-Derp-Peer-Key", Value: peer.String()},
 				{Name: "X-Derp-Peer-Gone-Reason", Value: strconv.Itoa(int(payload[key.NodePublicRawLen]))},
 			}
+		} else {
+			// legacy 32-byte PEER_GONE carries no reason byte, so the payload can't be typed
+			f.headers = []wire.Header{rawPayloadHeader(payload)}
 		}
 	case derpproto.FramePeerPresent:
 		if len(payload) >= key.NodePublicRawLen {
@@ -178,6 +181,8 @@ func decodeFrame(t derpproto.FrameType, payload []byte) frameFields {
 			if pp.AppName != "" {
 				f.headers = append(f.headers, wire.Header{Name: "X-Derp-Peer-Present-AppName", Value: pp.AppName})
 			}
+		} else {
+			f.headers = []wire.Header{rawPayloadHeader(payload)}
 		}
 	case derpproto.FrameNotePreferred:
 		home := strconv.FormatBool(len(payload) >= 1 && payload[0] != 0)
@@ -186,6 +191,8 @@ func decodeFrame(t derpproto.FrameType, payload []byte) frameFields {
 		if len(payload) >= key.NodePublicRawLen {
 			peer := key.NodePublicFromRaw32(mem.B(payload[:key.NodePublicRawLen]))
 			f.headers = []wire.Header{{Name: "X-Derp-Peer-Key", Value: peer.String()}}
+		} else {
+			f.headers = []wire.Header{rawPayloadHeader(payload)}
 		}
 	case derpproto.FramePing, derpproto.FramePong:
 		f.headers = []wire.Header{{Name: "X-Derp-Ping-Token", Value: base64.StdEncoding.EncodeToString(payload)}}
@@ -195,6 +202,8 @@ func decodeFrame(t derpproto.FrameType, payload []byte) frameFields {
 				{Name: "X-Derp-Reconnect-Ms", Value: strconv.FormatUint(uint64(binary.BigEndian.Uint32(payload[:4])), 10)},
 				{Name: "X-Derp-Try-For-Ms", Value: strconv.FormatUint(uint64(binary.BigEndian.Uint32(payload[4:8])), 10)},
 			}
+		} else {
+			f.headers = []wire.Header{rawPayloadHeader(payload)}
 		}
 	case derpproto.FrameHealth:
 		f.body = payload
@@ -214,8 +223,16 @@ func packetMetaHeaders(payload []byte) []wire.Header {
 	}
 }
 
+// rawPayloadHeader preserves a payload too short to decode into typed fields, so an
+// unedited replay resends the captured bytes instead of fabricated defaults.
+func rawPayloadHeader(payload []byte) wire.Header {
+	return wire.Header{Name: "X-Derp-Raw-Payload", Value: base64.StdEncoding.EncodeToString(payload)}
+}
+
 // encodePayload rebuilds a frame payload from its typed fields, honoring header/body
-// mutations. It is the inverse of decodeFrame for the fields the capture path exposes.
+// mutations. It is the inverse of decodeFrame for the fields the capture path exposes:
+// typed headers drive the rebuild when present, else a preserved raw payload or body
+// replays verbatim rather than fabricating zero-key defaults.
 func encodePayload(f frameFields) []byte {
 	switch f.typ {
 	case derpproto.FrameSendPacket, derpproto.FrameRecvPacket:
@@ -223,14 +240,28 @@ func encodePayload(f frameFields) []byte {
 		if f.typ == derpproto.FrameSendPacket {
 			keyHdr = "X-Derp-Dst-Key"
 		}
+		if _, ok := headerLookup(f.headers, keyHdr); !ok {
+			return f.bodyRaw // sub-key-length capture or replaced body: no key prefix to rebuild
+		}
 		return append(rawKey(f.headers, keyHdr), f.bodyRaw...)
 	case derpproto.FrameForwardPacket:
+		_, hasSrc := headerLookup(f.headers, "X-Derp-Src-Key")
+		_, hasDst := headerLookup(f.headers, "X-Derp-Dst-Key")
+		if !hasSrc && !hasDst {
+			return f.bodyRaw
+		}
 		out := append(rawKey(f.headers, "X-Derp-Src-Key"), rawKey(f.headers, "X-Derp-Dst-Key")...)
 		return append(out, f.bodyRaw...)
 	case derpproto.FramePeerGone:
+		if raw := preservedPayload(f.headers, "X-Derp-Peer-Key"); raw != nil {
+			return raw
+		}
 		reason, _ := strconv.Atoi(headerValue(f.headers, "X-Derp-Peer-Gone-Reason"))
 		return append(rawKey(f.headers, "X-Derp-Peer-Key"), byte(reason))
 	case derpproto.FramePeerPresent:
+		if raw := preservedPayload(f.headers, "X-Derp-Peer-Key"); raw != nil {
+			return raw
+		}
 		tail := f.tail
 		if tail == nil {
 			// on a message-reconstructed replay tail is nil, so recover the tail from the round-trip header
@@ -243,11 +274,18 @@ func encodePayload(f frameFields) []byte {
 		}
 		return []byte{0}
 	case derpproto.FrameClosePeer:
+		if raw := preservedPayload(f.headers, "X-Derp-Peer-Key"); raw != nil {
+			return raw
+		}
 		return rawKey(f.headers, "X-Derp-Peer-Key")
 	case derpproto.FramePing, derpproto.FramePong:
 		tok, _ := base64.StdEncoding.DecodeString(headerValue(f.headers, "X-Derp-Ping-Token"))
 		return tok
 	case derpproto.FrameRestarting:
+		raw := preservedPayload(f.headers, "X-Derp-Reconnect-Ms", "X-Derp-Try-For-Ms")
+		if raw != nil {
+			return raw
+		}
 		reconnect, _ := strconv.ParseUint(headerValue(f.headers, "X-Derp-Reconnect-Ms"), 10, 32)
 		tryFor, _ := strconv.ParseUint(headerValue(f.headers, "X-Derp-Try-For-Ms"), 10, 32)
 		out := make([]byte, 8)
@@ -272,11 +310,47 @@ func rawKey(headers []wire.Header, name string) []byte {
 	return k.AppendTo(make([]byte, 0, key.NodePublicRawLen))
 }
 
-func headerValue(headers []wire.Header, name string) string {
-	for _, h := range headers {
-		if strings.EqualFold(h.Name, name) {
-			return h.Value
+// preservedPayload returns the raw payload captured for a frame whose typed headers are
+// all absent, or nil when any typed header is set (the rebuild is header-driven) or no
+// raw copy exists.
+func preservedPayload(headers []wire.Header, typed ...string) []byte {
+	for _, name := range typed {
+		if _, ok := headerLookup(headers, name); ok {
+			return nil
 		}
 	}
-	return ""
+	raw, ok := rawPayload(headers)
+	if !ok {
+		return nil
+	}
+	return raw
+}
+
+// rawPayload decodes the preserved payload header, ok=false when absent or malformed.
+func rawPayload(headers []wire.Header) ([]byte, bool) {
+	v, ok := headerLookup(headers, "X-Derp-Raw-Payload")
+	if !ok {
+		return nil, false
+	}
+	b, err := base64.StdEncoding.DecodeString(v)
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// headerLookup returns the named header's value and presence, so an empty value stays
+// distinct from absence.
+func headerLookup(headers []wire.Header, name string) (string, bool) {
+	for _, h := range headers {
+		if strings.EqualFold(h.Name, name) {
+			return h.Value, true
+		}
+	}
+	return "", false
+}
+
+func headerValue(headers []wire.Header, name string) string {
+	v, _ := headerLookup(headers, name)
+	return v
 }

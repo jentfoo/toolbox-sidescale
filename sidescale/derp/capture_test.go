@@ -101,6 +101,117 @@ func TestEncodePayloadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestDecodeFrameShortPayload(t *testing.T) {
+	t.Parallel()
+
+	peer := key.NewNode().Public()
+
+	t.Run("legacy_peer_gone", func(t *testing.T) {
+		payload := peer.AppendTo(nil) // 32-byte key only, no reason byte
+		f := decodeFrame(derpproto.FramePeerGone, payload)
+		_, hasKey := headerLookup(f.headers, "X-Derp-Peer-Key")
+		assert.False(t, hasKey)
+		assert.Equal(t, base64.StdEncoding.EncodeToString(payload), headerValue(f.headers, "X-Derp-Raw-Payload"))
+	})
+
+	t.Run("short_packet_whole_payload", func(t *testing.T) {
+		f := decodeFrame(derpproto.FrameSendPacket, []byte("tiny"))
+		assert.Equal(t, []byte("tiny"), f.bodyRaw)
+		_, hasKey := headerLookup(f.headers, "X-Derp-Dst-Key")
+		assert.False(t, hasKey)
+	})
+
+	t.Run("short_peer_present", func(t *testing.T) {
+		f := decodeFrame(derpproto.FramePeerPresent, []byte("short-tail"))
+		_, hasKey := headerLookup(f.headers, "X-Derp-Peer-Key")
+		assert.False(t, hasKey)
+		assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("short-tail")), headerValue(f.headers, "X-Derp-Raw-Payload"))
+	})
+
+	t.Run("short_close_peer", func(t *testing.T) {
+		f := decodeFrame(derpproto.FrameClosePeer, []byte("short"))
+		assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("short")), headerValue(f.headers, "X-Derp-Raw-Payload"))
+	})
+
+	t.Run("short_restarting", func(t *testing.T) {
+		payload := []byte{0, 0, 0x27, 0x10} // reconnect only, no try-for
+		f := decodeFrame(derpproto.FrameRestarting, payload)
+		_, hasReconnect := headerLookup(f.headers, "X-Derp-Reconnect-Ms")
+		assert.False(t, hasReconnect)
+		assert.Equal(t, base64.StdEncoding.EncodeToString(payload), headerValue(f.headers, "X-Derp-Raw-Payload"))
+	})
+
+	t.Run("empty_peer_gone_header_present", func(t *testing.T) {
+		// an empty payload encodes to an empty value, which must stay distinct from absence
+		f := decodeFrame(derpproto.FramePeerGone, nil)
+		_, hasRaw := headerLookup(f.headers, "X-Derp-Raw-Payload")
+		assert.True(t, hasRaw)
+	})
+}
+
+func TestEncodePayloadShortFrameRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	peer := key.NewNode().Public()
+	cases := []struct {
+		name    string
+		typ     derpproto.FrameType
+		payload []byte
+	}{
+		{"legacy_peer_gone", derpproto.FramePeerGone, peer.AppendTo(nil)},
+		{"empty_peer_gone", derpproto.FramePeerGone, []byte{}},
+		{"short_send_packet", derpproto.FrameSendPacket, []byte("sub-key-len")},
+		{"empty_send_packet", derpproto.FrameSendPacket, []byte{}},
+		{"short_recv_packet", derpproto.FrameRecvPacket, []byte("sub")},
+		{"short_forward_packet", derpproto.FrameForwardPacket, []byte("sub-two-keys")},
+		{"short_peer_present", derpproto.FramePeerPresent, []byte("short-tail")},
+		{"short_close_peer", derpproto.FrameClosePeer, []byte("short")},
+		{"short_restarting", derpproto.FrameRestarting, []byte{0, 0, 0x27, 0x10}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// round-trip through the flow message, the shape a replay actually receives
+			msg := frameMessage(tc.typ, decodeFrame(tc.typ, tc.payload))
+			assert.Equal(t, tc.payload, encodePayload(frameFromMessage(msg, tc.typ)))
+		})
+	}
+}
+
+func TestEncodePayloadEditedShortFrame(t *testing.T) {
+	t.Parallel()
+
+	peer := key.NewNode().Public()
+
+	t.Run("peer_gone_typed_headers_win", func(t *testing.T) {
+		// operator edits an undecodable capture to typed headers: rebuild is header-driven
+		f := decodeFrame(derpproto.FramePeerGone, peer.AppendTo(nil))
+		f.headers = append(f.headers,
+			wire.Header{Name: "X-Derp-Peer-Key", Value: peer.String()},
+			wire.Header{Name: "X-Derp-Peer-Gone-Reason", Value: "2"},
+		)
+		assert.Equal(t, append(peer.AppendTo(nil), 0x02), encodePayload(f))
+	})
+
+	t.Run("restarting_single_duration_header_wins", func(t *testing.T) {
+		f := decodeFrame(derpproto.FrameRestarting, []byte{0, 0, 0x27, 0x10})
+		f.headers = append(f.headers, wire.Header{Name: "X-Derp-Try-For-Ms", Value: "1000"})
+		assert.Equal(t, []byte{0, 0, 0, 0, 0, 0, 0x03, 0xe8}, encodePayload(f))
+	})
+
+	t.Run("packet_key_header_added_rebuilds", func(t *testing.T) {
+		f := decodeFrame(derpproto.FrameSendPacket, []byte("sub"))
+		f.headers = append(f.headers, wire.Header{Name: "X-Derp-Dst-Key", Value: peer.String()})
+		assert.Equal(t, append(peer.AppendTo(nil), []byte("sub")...), encodePayload(f))
+	})
+
+	t.Run("malformed_raw_header_falls_back", func(t *testing.T) {
+		f := frameFields{typ: derpproto.FramePeerGone, headers: []wire.Header{
+			{Name: "X-Derp-Raw-Payload", Value: "not-base64!"},
+		}}
+		assert.Equal(t, bytes.Repeat([]byte{0}, key.NodePublicRawLen+1), encodePayload(f))
+	})
+}
+
 func TestCaptureFrame(t *testing.T) {
 	t.Parallel()
 
