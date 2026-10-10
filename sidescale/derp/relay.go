@@ -28,6 +28,10 @@ func (h *Handler) runTerminate(ctx context.Context, client *sidecar.StreamConn) 
 	defer func() { _ = client.Close() }()
 	p := client.Open()
 
+	// bound the login reads, cleared once the client authenticates so the frame
+	// phase stays unbounded
+	_ = client.SetReadDeadline(time.Now().Add(clientHandshakeTimeout))
+
 	br := bufio.NewReader(client)
 	req, err := http.ReadRequest(br)
 	if err != nil {
@@ -57,6 +61,7 @@ func (h *Handler) runTerminate(ctx context.Context, client *sidecar.StreamConn) 
 		h.tunnelError(p.StreamID, "client info", err)
 		return
 	}
+	_ = client.SetReadDeadline(time.Time{})
 
 	// synthesize the server login response with no upstream
 	serverInfo := &derp.ServerInfo{Version: derpproto.ProtocolVersion}

@@ -31,6 +31,10 @@ const (
 	// upstreamHandshakeTimeout bounds the upstream DERP handshake reads; the real
 	// server enforces a 10-s deadline over its greeting and client-info steps.
 	upstreamHandshakeTimeout = 10 * time.Second
+
+	// clientHandshakeTimeout bounds the client-facing login (upgrade parse, greeting,
+	// client-info read) as one window over the two 10-s steps the real server allows.
+	clientHandshakeTimeout = 20 * time.Second
 )
 
 // maxRetainedTunnelHosts bounds the fresh-replay host record so tunnel churn can't grow it without limit.
@@ -100,6 +104,10 @@ func (h *Handler) runTunnel(ctx context.Context, client *sidecar.StreamConn) {
 	host := p.Host
 	clientFr := newFrameConn(client)
 
+	// bound the login reads, cleared once the client authenticates so the frame
+	// phase stays unbounded
+	_ = client.SetReadDeadline(time.Now().Add(clientHandshakeTimeout))
+
 	// client-facing handshake: server greeting, then read + open the client's box
 	if err := clientFr.WriteFrame(derpproto.FrameServerKey, derpproto.ServerKeyPayload(h.serverKey.Public())); err != nil {
 		h.tunnelError(p.StreamID, "write server key", err)
@@ -110,6 +118,7 @@ func (h *Handler) runTunnel(ctx context.Context, client *sidecar.StreamConn) {
 		h.tunnelError(p.StreamID, "client info", err)
 		return
 	}
+	_ = client.SetReadDeadline(time.Time{})
 
 	// upstream handshake as a DERP client
 	nodeKey, err := h.nodeKey(clientPub.String())
