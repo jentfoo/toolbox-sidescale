@@ -408,6 +408,36 @@ func TestReplay(t *testing.T) {
 		assert.Empty(t, res.NewFlowIDs) // the produced flow was filtered: no id to report
 		assert.Empty(t, flows.list())
 	})
+
+	// a rejected streaming map replays as an ordinary buffered response: the plain-text
+	// error body must reach the caller instead of tripping the frame decoder
+	t.Run("stream_rejection_buffers", func(t *testing.T) {
+		flows := newRecordingFlows()
+		h := testHandler(t, &cfg, flows, noopCore{}, stubRules{}, scsidecar.Config{})
+		fakeTunnel(t, h, "tunnelX", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Equal(t, mapEndpoint, r.URL.Path)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		}))
+
+		src := &wire.Flow{
+			ProtocolTag:  controlProtocolTag,
+			ParentFlowID: "tunnelX",
+			Request:      &wire.FlowMessage{Method: http.MethodPost, Path: mapEndpoint, Headers: []wire.Header{{Name: ":method", Value: "POST"}, {Name: ":path", Value: mapEndpoint}}, Body: []byte(`{"Stream":true}`)},
+		}
+		res, err := h.replay(t.Context(), wire.SidecarSendParams{FlowID: "srcFlow", Flow: src})
+		require.NoError(t, err)
+		require.Len(t, res.NewFlowIDs, 1)
+		require.NotNil(t, res.Response)
+		assert.Equal(t, http.StatusUnauthorized, res.Response.StatusCode)
+		assert.Contains(t, string(res.Response.Body), "Unauthorized")
+
+		// buffered control flow, not a stream parent: the decoder never ran
+		produced, ok := flows.Get(res.NewFlowIDs[0])
+		require.True(t, ok)
+		assert.Equal(t, controlProtocolTag, produced.ProtocolTag)
+		require.NotNil(t, produced.Response)
+		assert.Contains(t, string(produced.Response.Body), "Unauthorized")
+	})
 }
 
 func TestSelectTunnel(t *testing.T) {

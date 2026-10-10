@@ -194,6 +194,36 @@ func TestCaptureInnerStreamParent(t *testing.T) {
 		assert.Equal(t, "new", parents[0].Response.Headers.Get("X-Upstream"))
 		assert.True(t, flows.wasCompleted(parents[0].FlowID))
 	})
+
+	t.Run("rejection_buffers_verbatim", func(t *testing.T) {
+		flows := newRecordingFlows()
+		h := testHandler(t, &cfg, flows, noopCore{}, stubRules{}, scsidecar.Config{})
+		at := fakeTunnel(t, h, "tunnel1", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		}))
+
+		resp, err := h.captureInner(t.Context(), at)(streamReq())
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+
+		// the rejection is relayed intact: status and body, not an empty stream error
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		assert.Contains(t, string(body), "Unauthorized")
+
+		// captured as one buffered server-to-client flow; no stream flows means the
+		// frame decoder never ran (so it can neither fail nor log a decode error)
+		srvToClient := bulk.SliceFilter(func(f *types.Flow) bool {
+			return f.ProtocolTag == controlProtocolTag && f.Direction == adapter.DirServerToClient
+		}, flows.list())
+		require.Len(t, srvToClient, 1)
+		require.NotNil(t, srvToClient[0].Response)
+		assert.Equal(t, http.StatusUnauthorized, srvToClient[0].Response.StatusCode)
+		assert.Contains(t, string(srvToClient[0].Response.Body), "Unauthorized")
+		streams := bulk.SliceFilter(func(f *types.Flow) bool { return f.ProtocolTag == streamProtocolTag }, flows.list())
+		assert.Empty(t, streams)
+	})
 }
 
 func TestRequestHeaders(t *testing.T) {

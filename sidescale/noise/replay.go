@@ -243,7 +243,9 @@ func (h *Handler) rebind(endpoint string, req *wire.FlowMessage, at *activeTunne
 func (h *Handler) emitProduced(ctx context.Context, req *wire.FlowMessage, resp *http.Response, parentFlowID string, ann map[string]any, cleanup func()) (wire.SidecarSendResult, error) {
 	now := time.Now()
 
-	if req.Path == mapEndpoint && isStreamingMap(req.Path, req.Body) {
+	// stream treatment requires success: an upstream rejection's plain-text body is
+	// not map frames, so emit a non-2xx as an ordinary buffered response instead
+	if req.Path == mapEndpoint && isStreamingMap(req.Path, req.Body) && isStreamStatus(resp.StatusCode) {
 		statusHeaders := responseHeaders(resp)
 		parentID, _, err := h.conn.PushFlow(ctx, wire.Flow{
 			ProtocolTag:  streamProtocolTag,

@@ -54,8 +54,10 @@ func (h *Handler) captureInner(ctx context.Context, at *activeTunnel) tsproto.Ca
 		})
 
 		// long-lived streaming /machine/map: capture chunk-by-chunk as ordered
-		// children of the stream parent, re-encoding to the client as they flow
-		if isStreamingMap(req.URL.Path, fwdBody) {
+		// children of the stream parent, re-encoding to the client as they flow.
+		// A non-2xx body is not map frames; buffer it so status and body reach
+		// the client (and response rules) intact.
+		if isStreamingMap(req.URL.Path, fwdBody) && isStreamStatus(resp.StatusCode) {
 			pseudo, regular := bulk.SliceSplit(isPseudoHeader, responseHeaders(resp))
 			mutRegular, fired := h.conn.Rules().ApplyHeaders(regular, wire.RuleTypeResponseHeader)
 			// a fired rule mutates the parent's headers and the client-facing stream
@@ -277,6 +279,7 @@ func isHopHeader(name string) bool {
 }
 
 // isStreamingMap reports if an inner request is a streaming /machine/map, signaled by Stream:true in the MapRequest body.
+// Callers must additionally require success (2xx): only then does the body carry map frames.
 func isStreamingMap(path string, body []byte) bool {
 	if path != mapEndpoint {
 		return false
@@ -286,3 +289,8 @@ func isStreamingMap(path string, body []byte) bool {
 	}
 	return json.Unmarshal(body, &mr) == nil && mr.Stream
 }
+
+// isStreamStatus reports whether a streaming /machine/map response may carry map
+// frames: any success (2xx) status. Rejections and redirects carry plain bodies;
+// buffer those as ordinary responses instead of feeding the frame decoder.
+func isStreamStatus(code int) bool { return code >= 200 && code < 300 }
