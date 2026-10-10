@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"encoding"
 	"fmt"
 	"os"
@@ -23,7 +24,8 @@ func Load[T any, PT PrivKey[T]](path, keyLabel string) (T, error) {
 	if err != nil {
 		return k, fmt.Errorf("sidescale: read %s %s: %w", keyLabel, path, err)
 	}
-	if err := PT(&k).UnmarshalText(data); err != nil {
+	// Tailscale key parsing wants exact length, so drop editor/echo whitespace first.
+	if err := PT(&k).UnmarshalText(bytes.TrimSpace(data)); err != nil {
 		return k, fmt.Errorf("sidescale: parse %s %s: %w", keyLabel, path, err)
 	}
 	return k, nil
