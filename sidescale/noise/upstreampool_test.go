@@ -2,6 +2,7 @@ package noise
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -84,6 +85,20 @@ func fakeUpstream(t *testing.T, h *Handler, id key.MachinePublic, host string, v
 	return &sharedUpstream{key: poolKey{id: id, host: host, version: version}, uc: fakeUpstreamConn(t.Context(), t, h, host, version, srv), refs: 1}
 }
 
+// parkedWaiters returns the waiter count queued on the dial in flight for k, or -1
+// when no live entry exists. Poll via require.Eventually to sequence an event only
+// after a waiter has queued.
+func parkedWaiters(h *Handler, k poolKey) int32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	u := h.upstreams[k]
+	if u == nil {
+		return -1
+	}
+	return u.waiters.Load()
+}
+
 func okSrv() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 }
@@ -151,7 +166,9 @@ func TestGetOrCreateUpstream(t *testing.T) {
 			}()
 		}
 
-		require.Eventually(t, func() bool { return atomic.LoadInt32(&calls) == 1 }, time.Second, time.Millisecond)
+		// every caller but the dialer queues before the dial resolves
+		k := poolKey{id: mk.Public(), host: "ctrl.example", version: ver}
+		require.Eventually(t, func() bool { return parkedWaiters(h, k) == n-1 }, time.Second, time.Millisecond)
 		close(release)
 
 		first := <-results
@@ -187,6 +204,181 @@ func TestGetOrCreateUpstream(t *testing.T) {
 		u2, err := h.getOrCreateUpstream(t.Context(), "ctrl.example", mk, ver, "")
 		require.NoError(t, err)
 		assert.Same(t, u1, u2)
+		assert.Equal(t, int32(1), atomic.LoadInt32(&calls))
+	})
+
+	// a waiter queued on a dial whose dialer's ctx dies mid-dial re-dials under its
+	// own live ctx instead of inheriting the foreign context.Canceled
+	t.Run("waiter_redials_after_dialer_cancel", func(t *testing.T) {
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+		k := poolKey{id: mk.Public(), host: "ctrl.example", version: ver}
+		var calls int32
+		firstDial := make(chan struct{})
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			if atomic.AddInt32(&calls, 1) == 1 {
+				close(firstDial)
+				<-ctx.Done() // the first dialer's client stream drops mid-dial
+				return nil, ctx.Err()
+			}
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+
+		dialerCtx, cancelDialer := context.WithCancel(context.Background())
+		go func() {
+			_, _ = h.getOrCreateUpstream(dialerCtx, "ctrl.example", mk, ver, "")
+		}()
+		<-firstDial
+
+		waiterDone := make(chan *sharedUpstream, 1)
+		go func() {
+			u, werr := h.getOrCreateUpstream(t.Context(), "ctrl.example", mk, ver, "")
+			assert.NoError(t, werr)
+			waiterDone <- u
+		}()
+		require.Eventually(t, func() bool { return parkedWaiters(h, k) == 1 }, time.Second, time.Millisecond)
+		cancelDialer()
+
+		u := <-waiterDone
+		require.NotNil(t, u)
+		assert.True(t, u.uc.bridge.Usable())
+		assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
+	})
+
+	// a chain of canceled dialers converges: each waiter retries the failed dial and
+	// takes over as the next dialer, until one with a live ctx succeeds
+	t.Run("waiter_survives_cancel_chain", func(t *testing.T) {
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+		k := poolKey{id: mk.Public(), host: "ctrl.example", version: ver}
+		const canceledDialers = 2
+		var calls int32
+		dialStarted := make(chan struct{}, canceledDialers)
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			if atomic.AddInt32(&calls, 1) <= canceledDialers {
+				dialStarted <- struct{}{}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+
+		dialerCtx, cancelDialer := context.WithCancel(context.Background())
+		go func() {
+			_, _ = h.getOrCreateUpstream(dialerCtx, "ctrl.example", mk, ver, "")
+		}()
+		<-dialStarted
+
+		// the chained caller retries the canceled dial and dials under its own ctx
+		chainedCtx, cancelChained := context.WithCancel(context.Background())
+		chainedDone := make(chan error, 1)
+		go func() {
+			_, cerr := h.getOrCreateUpstream(chainedCtx, "ctrl.example", mk, ver, "")
+			chainedDone <- cerr
+		}()
+		require.Eventually(t, func() bool { return parkedWaiters(h, k) == 1 }, time.Second, time.Millisecond)
+		cancelDialer()
+
+		// the chained caller is now the dialer; queue the final waiter behind it
+		<-dialStarted
+		finalDone := make(chan *sharedUpstream, 1)
+		go func() {
+			u, werr := h.getOrCreateUpstream(t.Context(), "ctrl.example", mk, ver, "")
+			assert.NoError(t, werr)
+			finalDone <- u
+		}()
+		require.Eventually(t, func() bool { return parkedWaiters(h, k) == 1 }, time.Second, time.Millisecond)
+		cancelChained()
+		require.ErrorIs(t, <-chainedDone, context.Canceled)
+
+		u := <-finalDone
+		require.NotNil(t, u)
+		assert.True(t, u.uc.bridge.Usable())
+		assert.Equal(t, int32(canceledDialers+1), atomic.LoadInt32(&calls))
+	})
+
+	// a hung upstream fails queued waiters once with the dial error; they never re-dial
+	// per waiter (deadline-exceeded must not amplify into N upstream handshakes)
+	t.Run("hung_upstream_fails_waiters_once", func(t *testing.T) {
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+		k := poolKey{id: mk.Public(), host: "ctrl.example", version: ver}
+		var calls int32
+		firstDial := make(chan struct{})
+		failNow := make(chan struct{})
+		h.dialFn = func(context.Context, string, key.MachinePrivate, uint16) (*upstreamConn, error) {
+			atomic.AddInt32(&calls, 1)
+			close(firstDial)
+			<-failNow // stands in for the 30s handshake bound firing on a hung upstream
+			return nil, fmt.Errorf("upstream handshake: %w", context.DeadlineExceeded)
+		}
+
+		go func() {
+			_, _ = h.getOrCreateUpstream(t.Context(), "ctrl.example", mk, ver, "")
+		}()
+		<-firstDial
+
+		const waiters = 3
+		errs := make(chan error, waiters)
+		for range waiters {
+			go func() {
+				_, werr := h.getOrCreateUpstream(t.Context(), "ctrl.example", mk, ver, "")
+				errs <- werr
+			}()
+		}
+		require.Eventually(t, func() bool { return parkedWaiters(h, k) == waiters }, time.Second, time.Millisecond)
+		close(failNow)
+
+		for range waiters {
+			require.ErrorIs(t, <-errs, context.DeadlineExceeded)
+		}
+		assert.Equal(t, int32(1), atomic.LoadInt32(&calls))
+	})
+
+	// a waiter whose own client stream dies stops waiting at once, without disturbing
+	// the in-flight dial serving the others
+	t.Run("waiter_cancel_leaves_dial_alone", func(t *testing.T) {
+		h := testHandler(t, &cfg, newRecordingFlows(), noopCore{}, stubRules{}, scsidecar.Config{})
+		k := poolKey{id: mk.Public(), host: "ctrl.example", version: ver}
+		var calls int32
+		firstDial := make(chan struct{})
+		release := make(chan struct{})
+		h.dialFn = func(ctx context.Context, host string, _ key.MachinePrivate, version uint16) (*upstreamConn, error) {
+			atomic.AddInt32(&calls, 1)
+			close(firstDial)
+			<-release // hold the dial open until the abandoned waiter has bailed
+			return fakeUpstreamConn(ctx, t, h, host, version, okSrv()), nil
+		}
+
+		go func() {
+			_, _ = h.getOrCreateUpstream(t.Context(), "ctrl.example", mk, ver, "")
+		}()
+		<-firstDial
+
+		waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+		waiterDone := make(chan error, 1)
+		go func() {
+			_, werr := h.getOrCreateUpstream(waiterCtx, "ctrl.example", mk, ver, "")
+			waiterDone <- werr
+		}()
+		require.Eventually(t, func() bool { return parkedWaiters(h, k) == 1 }, time.Second, time.Millisecond)
+		cancelWaiter()
+
+		var werr error
+		require.Eventually(t, func() bool {
+			select {
+			case werr = <-waiterDone:
+				return true
+			default:
+				return false
+			}
+		}, time.Second, time.Millisecond)
+		require.ErrorIs(t, werr, context.Canceled)
+
+		close(release) // the dial finishes after the waiter is gone
+		require.Eventually(t, func() bool {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			u := h.upstreams[k]
+			return u != nil && u.ready == nil && u.uc != nil
+		}, time.Second, time.Millisecond)
 		assert.Equal(t, int32(1), atomic.LoadInt32(&calls))
 	})
 }

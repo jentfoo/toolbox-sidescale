@@ -2,7 +2,9 @@ package noise
 
 import (
 	"context"
+	"errors"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"tailscale.com/types/key"
@@ -32,6 +34,10 @@ type sharedUpstream struct {
 	closed    bool
 	ready     chan struct{} // open while dialing, nil once resolved
 	dialErr   error         // dial failure, observed by coalesced waiters
+	// dialCanceled marks a dial whose dialer's ctx canceled; waiters with a live ctx
+	// re-dial under their own instead of inheriting the failure
+	dialCanceled bool
+	waiters      atomic.Int32 // parked waiter count; coalesced-dial observability
 }
 
 // poolSession returns the pool discriminator for a client-facing tunnel: empty in
@@ -61,7 +67,8 @@ func (h *Handler) dedicatedPoolSession() string {
 
 // getOrCreateUpstream returns the pooled upstream for (machineKey, host, version,
 // session) with the caller's ref held, dialing one only when none is live. Concurrent
-// callers for the same key coalesce onto a single dial.
+// callers for the same key coalesce onto a single dial; a dial canceled only by its
+// dialer's own context is retried by waiters whose contexts are still live.
 func (h *Handler) getOrCreateUpstream(ctx context.Context, host string, machineKey key.MachinePrivate, version uint16, session string) (*sharedUpstream, error) {
 	k := poolKey{id: machineKey.Public(), host: host, version: version, session: session}
 	for {
@@ -76,14 +83,27 @@ func (h *Handler) getOrCreateUpstream(ctx context.Context, host string, machineK
 				h.mu.Unlock()
 				return u, nil
 			}
-			// dial in flight: wait for it, then loop to acquire or observe its error
+			// dial in flight: wait bounded by our own ctx, then loop to acquire or
+			// observe its error
 			ready := u.ready
+			u.waiters.Add(1)
 			h.mu.Unlock()
-			<-ready
+			select {
+			case <-ready:
+				u.waiters.Add(-1)
+			case <-ctx.Done():
+				// abandoned waiter; the in-flight dial still serves the others
+				u.waiters.Add(-1)
+				return nil, ctx.Err()
+			}
 			h.mu.Lock()
-			dialErr := u.dialErr
+			dialErr, dialCanceled := u.dialErr, u.dialCanceled
 			h.mu.Unlock()
 			if dialErr != nil {
+				if dialCanceled && ctx.Err() == nil {
+					// only the dialer's ctx died and the entry is evicted: re-dial under ours
+					continue
+				}
 				return nil, dialErr
 			}
 			continue
@@ -102,6 +122,9 @@ func (h *Handler) getOrCreateUpstream(ctx context.Context, host string, machineK
 		u.ready = nil
 		if err != nil {
 			u.dialErr = err
+			// tag at the source from the dialer's ctx state: a hung upstream's deadline
+			// or a real failure must not be re-dialed per coalesced waiter
+			u.dialCanceled = errors.Is(ctx.Err(), context.Canceled)
 			u.closed = true
 			if h.upstreams[k] == u {
 				delete(h.upstreams, k)
