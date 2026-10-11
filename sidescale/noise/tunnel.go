@@ -88,6 +88,8 @@ func (h *Handler) runTunnel(ctx context.Context, sc *sidecar.StreamConn, init []
 		machineKey:   machineKey,
 		version:      version,
 		session:      h.poolSession(p.StreamID),
+		client:       innerClient,
+		tornDown:     make(chan struct{}),
 	}
 	// close releases whichever upstream the tunnel is bound to at teardown, healed or
 	// not; closing also stops a racing forward from healing this orphan onto a fresh dial
@@ -112,13 +114,15 @@ func (h *Handler) runTunnel(ctx context.Context, sc *sidecar.StreamConn, init []
 	// an uncaptured envelope (operator filter) has no id: skip the registry and the
 	// teardown so "" never keys tunnel state or stores a junk flow
 	if captured {
-		// complete the envelope on every subsequent exit so it is never left in-flight;
-		// teardown rides the stream's connection context, which outlives any request scope
-		defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
-
 		at.flowID = tunnelID
 		h.registerTunnel(tunnelID, at)
-		defer h.deregisterTunnel(tunnelID)
+		// deregistration must run after the envelope completes (LIFO): tornDown closing
+		// then guarantees the completion RPC was issued, which is what a drain waits on
+		defer h.deregisterTunnel(at)
+		defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
+	}
+	if h.Draining() {
+		return // drained mid-handshake: teardown completes the envelope
 	}
 
 	// forward the server EarlyNoise to the client before HTTP/2, per the configured
@@ -240,8 +244,10 @@ type activeTunnel struct {
 	version      uint16
 	session      string // pool discriminator, to re-dial on heal
 	flowID       string
-	closed       bool // teardown returned the tunnel's upstream ref; heals must not swap or re-dial
-	healFailed   bool // guards the wedge signal to one line per dead-upstream episode
+	client       net.Conn      // client-facing decrypted half; nil for fresh replay/injection tunnels
+	tornDown     chan struct{} // closed by deregisterTunnel; the drain waits per tunnel
+	closed       bool          // teardown returned the tunnel's upstream ref; heals must not swap or re-dial
+	healFailed   bool          // guards the wedge signal to one line per dead-upstream episode
 }
 
 // current returns the tunnel's live upstream and bridge for forwarding.
@@ -319,10 +325,13 @@ func (h *Handler) registerTunnel(id string, t *activeTunnel) {
 	h.mu.Unlock()
 }
 
-func (h *Handler) deregisterTunnel(id string) {
+// deregisterTunnel removes at from the live-tunnel registry and closes its tornDown
+// signal, which a pending shutdown drain waits on per tunnel.
+func (h *Handler) deregisterTunnel(at *activeTunnel) {
 	h.mu.Lock()
-	delete(h.tunnels, id)
+	delete(h.tunnels, at.flowID)
 	h.mu.Unlock()
+	close(at.tornDown)
 }
 
 func (h *Handler) getTunnel(id string) *activeTunnel {
@@ -364,14 +373,16 @@ func (h *Handler) openFreshTunnel(ctx context.Context, controlHost string, machi
 		version:      version,
 		session:      session,
 		flowID:       tunnelID,
+		tornDown:     make(chan struct{}),
 	}
 	if captured {
 		h.registerTunnel(tunnelID, at)
 	}
 	cleanup := func() {
 		if captured {
-			h.deregisterTunnel(tunnelID)
+			// complete before deregister so tornDown closing implies the envelope landed
 			_ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now())
+			h.deregisterTunnel(at)
 		}
 		// release the current upstream, which may have healed onto a fresh conn; closing
 		// also stops a racing forward from healing this orphan onto a fresh dial

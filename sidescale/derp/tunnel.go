@@ -44,15 +44,15 @@ const maxRetainedTunnelHosts = 256
 type activeTunnel struct {
 	flowID      string
 	clientKey   key.NodePublic
-	client      *sidecar.StreamConn
+	forceClose  func() // closes both conns to start the unwind; set for every registered tunnel
 	clientFr    *frameConn
-	upstream    *sidecar.StreamConn // nil under terminate
-	upstreamF   *frameConn          // nil under terminate
+	upstreamF   *frameConn // nil under terminate
 	upstreamID  string
 	nodeKey     key.NodePrivate // this tunnel's upstream client key (CLIENT_INFO re-seal)
 	upstreamPub key.NodePublic  // real upstream server key (CLIENT_INFO re-seal target)
 	mesh        bool            // client presented a mesh key
 	host        string          // upstream host, for fresh-replay re-proxy
+	tornDown    chan struct{}   // closed by deregisterTunnel; the shutdown drain waits per tunnel
 }
 
 func (h *Handler) registerTunnel(id string, t *activeTunnel) {
@@ -90,10 +90,13 @@ func (h *Handler) retainedTunnelHost(id string) (string, bool) {
 	return host, ok
 }
 
-func (h *Handler) deregisterTunnel(id string) {
+// deregisterTunnel removes at from the live-tunnel registry and closes its tornDown
+// signal, which a pending shutdown drain waits on per tunnel.
+func (h *Handler) deregisterTunnel(at *activeTunnel) {
 	h.mu.Lock()
-	delete(h.tunnels, id)
+	delete(h.tunnels, at.flowID)
 	h.mu.Unlock()
+	close(at.tornDown)
 }
 
 // runTunnel drives one client-facing /derp stream into a full bidirectional DERP MITM, capturing every bridged frame.
@@ -152,22 +155,23 @@ func (h *Handler) runTunnel(ctx context.Context, client *sidecar.StreamConn) {
 	// an uncaptured envelope (operator filter) has no id: skip the registry and the
 	// teardown so "" never keys tunnel state or stores a junk flow
 	if captured {
-		defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
-
-		h.registerTunnel(tunnelID, &activeTunnel{
+		at := &activeTunnel{
 			flowID:      tunnelID,
 			clientKey:   clientPub,
-			client:      client,
+			forceClose:  func() { _ = client.Close(); _ = up.stream.Close() },
 			clientFr:    clientFr,
-			upstream:    up.stream,
-			upstreamF:   up.fr,
 			upstreamID:  up.streamID,
 			nodeKey:     nodeKey,
 			upstreamPub: up.serverPub,
 			mesh:        !clientInfo.MeshKey.IsZero(),
 			host:        host,
-		})
-		defer h.deregisterTunnel(tunnelID)
+			tornDown:    make(chan struct{}),
+		}
+		h.registerTunnel(tunnelID, at)
+		// deregistration must run after the envelope completes (LIFO): tornDown closing
+		// then guarantees the completion RPC was issued, which is what a drain waits on
+		defer h.deregisterTunnel(at)
+		defer func() { _ = h.conn.CompleteFlow(ctx, tunnelID, nil, time.Now()) }()
 	}
 
 	// seal the upstream ServerInfo to the client to complete its login
@@ -259,6 +263,9 @@ func (u *upstreamTunnel) close() {
 
 // openUpstream dials the real DERP server and completes the DERP login as a client using nodeKey.
 func (h *Handler) openUpstream(ctx context.Context, host string, nodeKey key.NodePrivate, clientInfo *derp.ClientInfo) (*upstreamTunnel, error) {
+	if h.Draining() { // drain begun: no new upstreams
+		return nil, adapter.ErrShuttingDown
+	}
 	dialHost, dialPort, useTLS := h.upstreamDial(host)
 	var tlsSpec *wire.DialUpstreamTLS
 	if useTLS {

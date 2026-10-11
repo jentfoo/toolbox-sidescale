@@ -68,6 +68,7 @@ type Handler struct {
 	tunnels         map[string]*activeTunnel // keyed by tunnel envelope flow_id
 	tunnelHosts     map[string]string        // upstream host retained past teardown for fresh-replay re-proxy
 	tunnelHostOrder []string                 // insertion order for FIFO eviction
+	draining        bool                     // shutdown drain begun; guarded by mu
 }
 
 // NewHandler returns a DERP handler for the given connection. ctx bounds the
@@ -93,6 +94,10 @@ func NewHandler(ctx context.Context, conn *sidecar.Conn, router *sidecar.StreamR
 // ServeStream drives an accepted DERP stream: a relay-mode tunnel, or a
 // terminate-mode synthetic relay endpoint.
 func (h *Handler) ServeStream(ctx context.Context, sc *sidecar.StreamConn) {
+	if h.Draining() { // drain begun: no new tunnels
+		_ = sc.Close()
+		return
+	}
 	p := sc.Open()
 	switch {
 	case p.Path == derpPath:

@@ -66,6 +66,10 @@ func (h *Handler) getOrCreateUpstream(ctx context.Context, host string, machineK
 	k := poolKey{id: machineKey.Public(), host: host, version: version, session: session}
 	for {
 		h.mu.Lock()
+		if h.draining { // shutdown drain: no new upstream dials
+			h.mu.Unlock()
+			return nil, adapter.ErrShuttingDown
+		}
 		if u := h.upstreams[k]; u != nil && !u.closed {
 			if u.ready == nil { // established
 				h.acquireLocked(u)
@@ -105,6 +109,12 @@ func (h *Handler) getOrCreateUpstream(ctx context.Context, host string, machineK
 			h.mu.Unlock()
 			close(ready)
 			return nil, err
+		}
+		if u.closed { // drained mid-dial: the fresh conn dies here rather than leaking
+			h.mu.Unlock()
+			close(ready)
+			uc.close()
+			return nil, adapter.ErrShuttingDown
 		}
 		u.uc = uc
 		h.mu.Unlock()

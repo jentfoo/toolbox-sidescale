@@ -62,6 +62,7 @@ type Handler struct {
 	mu        sync.Mutex
 	tunnels   map[string]*activeTunnel    // keyed by tunnel envelope flow_id
 	upstreams map[poolKey]*sharedUpstream // pooled upstream conns, shared across tunnels
+	draining  bool                        // shutdown drain begun; guarded by mu
 }
 
 // NewHandler builds the Noise control-surface handler. ctx bounds the connection lifetime and roots handler-spawned work.
@@ -139,6 +140,10 @@ func (h *Handler) isControlHost(host string) bool {
 // ServeStream drives an accepted stream: a ts2021 tunnel, or a cleartext /key request
 // on the host-terminated control claim (sidecar_tls mode).
 func (h *Handler) ServeStream(ctx context.Context, sc *sidecar.StreamConn) {
+	if h.Draining() { // drain begun: no new tunnels or /key serves
+		_ = sc.Close()
+		return
+	}
 	p := sc.Open()
 	switch {
 	case p.Path == ts2021Path:
@@ -170,10 +175,6 @@ func (h *Handler) ServeStream(ctx context.Context, sc *sidecar.StreamConn) {
 	default:
 		_ = sc.Close()
 	}
-}
-
-func (h *Handler) OnShutdown(drainSeconds int) {
-	_ = h.conn.Log("info", "sidescale shutdown requested", map[string]any{"drain_seconds": drainSeconds})
 }
 
 // handshakeInit recovers the base64 Noise initiation from the captured request headers of the ts2021 upgrade.

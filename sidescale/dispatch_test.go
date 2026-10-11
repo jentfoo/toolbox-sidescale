@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"tailscale.com/types/key"
 
+	"github.com/go-appsec/toolbox/sidecar"
 	"github.com/go-appsec/toolbox/sidecar/wire"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/derp"
 	"github.com/jentfoo/toolbox-sidescale/sidescale/noise"
@@ -101,6 +105,37 @@ func TestDispatcherOnInvokeTool(t *testing.T) {
 		_, err := d.OnInvokeTool(wire.InvokeToolParams{Name: "mystery"})
 		require.ErrorContains(t, err, "unknown tool")
 	})
+}
+
+// TestDispatcherOnShutdown drives a real sidecar round trip: the host manager sends the
+// shutdown notification and waits for the ack, so both surfaces are drained once it returns.
+func TestDispatcherOnShutdown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping sidecar round-trip test in -short mode")
+	}
+	t.Parallel()
+
+	cfg := borrowConfig(t)
+	derpCfg := &derp.DerpConfig{DerpHosts: []string{"derp.test"}, RelayMode: derp.RelayModeRelay}
+	cfg.Derp = derpCfg
+
+	_, mgr, socket := startHost(t, filepath.Join(t.TempDir(), "sidecar.sock"))
+	conn, err := sidecar.Dial(t.Context(), socket, buildRegistration(cfg, testInstanceID))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	router := sidecar.NewStreamRouter(conn)
+	nh := noise.NewHandler(t.Context(), conn, router, cfg.Control, cfg.Name, key.NewMachine(),
+		func(string) (key.MachinePrivate, error) { return key.NewMachine(), nil })
+	dh := derp.NewHandler(t.Context(), conn, router, derpCfg, cfg.Name, key.NewNode(),
+		func(string) (key.NodePrivate, error) { return key.NewNode(), nil })
+	conn.SetHandler(newDispatcher(conn, router, cfg, nh, dh))
+
+	// the ack follows OnShutdown, so both surfaces have run their drain on return
+	mgr.Shutdown(context.Background())
+
+	assert.True(t, nh.Draining())
+	assert.True(t, dh.Draining())
 }
 
 func TestDerpShapedSend(t *testing.T) {

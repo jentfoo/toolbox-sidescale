@@ -110,6 +110,33 @@ func (d *dispatcher) OnClose(ctx context.Context) {
 	d.noise.Close(ctx)
 }
 
+// OnShutdown forwards sectool's graceful-close request to both surfaces concurrently,
+// so each surface gets the full drainSeconds window: tunnels close and their flows
+// complete before the ack. Runs ahead of OnClose, so keysub responders stay registered
+// during the drain.
+func (d *dispatcher) OnShutdown(drainSeconds int) {
+	_ = d.conn.Log("info", "sidescale shutdown requested", map[string]any{"drain_seconds": drainSeconds})
+
+	drains := []func(int) int{d.noise.Shutdown}
+	if d.derp != nil {
+		drains = append(drains, d.derp.Shutdown)
+	}
+	results := make(chan int, len(drains))
+	for _, drain := range drains { // concurrent: a wedged surface cannot starve the other
+		go func() { results <- drain(drainSeconds) }()
+	}
+
+	var left int
+	for range drains {
+		left += <-results
+	}
+	level, msg := "info", "sidescale drained"
+	if left > 0 {
+		level, msg = "warn", "drain window expired with tunnels open"
+	}
+	_ = d.conn.Log(level, msg, map[string]any{"drain_seconds": drainSeconds, "tunnels_left": left})
+}
+
 func (d *dispatcher) OnInvokeTool(p wire.InvokeToolParams) (wire.InvokeToolResult, error) {
 	switch {
 	case p.Name == noise.InjectToolName:

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-analyze/bulk"
 	"go4.org/mem"
 	"tailscale.com/derp"
 	"tailscale.com/types/key"
@@ -239,6 +240,19 @@ func (r *syntheticRelay) byTunnelID(flowID string) *relayClient {
 	defer r.mu.Unlock()
 
 	return r.byTunnel[flowID]
+}
+
+// closeAll force-disconnects every client and empties the registry, so a shutdown drain
+// never leaves routable peers behind. Later removes from unwinding conns are no-ops.
+func (r *syntheticRelay) closeAll() {
+	r.mu.Lock()
+	conns := bulk.MapValuesSlice(r.byTunnel)
+	r.byKey = map[key.NodePublic]*clientSet{}
+	r.byTunnel = map[string]*relayClient{}
+	r.mu.Unlock()
+	for _, c := range conns {
+		_ = c.fr.conn.Close()
+	}
 }
 
 // remove drops c from the registry, promoting a survivor or announcing the key gone on the last departure.
