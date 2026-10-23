@@ -107,7 +107,8 @@ func ServeH2Conn(ctx context.Context, conn net.Conn, h http.Handler) error {
 		return err
 	case <-ctx.Done():
 		_ = l.conn.Close() // ends the served conn and the pending Accept
-		<-served
+		serveErr := <-served
+		_ = serveErr // teardown after close, ctx.Err() reported below
 		return ctx.Err()
 	}
 }

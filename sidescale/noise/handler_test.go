@@ -22,12 +22,7 @@ func TestWaitSetup(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- h.waitSetup(t.Context()) }()
 		require.Never(t, func() bool {
-			select {
-			case <-done:
-				return true
-			default:
-				return false
-			}
+			return len(done) > 0
 		}, 150*time.Millisecond, 25*time.Millisecond)
 
 		close(h.setupDone) // Setup's completion signal
