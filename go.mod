@@ -1,6 +1,6 @@
 module github.com/jentfoo/toolbox-sidescale
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/go-analyze/bulk v0.1.6
@@ -8,7 +8,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
-	tailscale.com v1.104.1
+	tailscale.com v1.104.2
 )
 
 require (
